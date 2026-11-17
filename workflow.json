@@ -1,0 +1,1501 @@
+{
+  "name": "HubSpot Dead-Lead Recycling & Nurture Re-Entry Router (Safe-by-Default)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## HubSpot Dead-Lead Recycling & Nurture Re-Entry Router\n\n**Safe by default.** With no env vars this runs in **SANDBOX_MODE** on a synthetic fixture: zero network calls, nothing stamped, enrolled or listed. See **Dry-Run Routing Report**.\n\nPopulation: contacts on closed-lost deals + disqualified lead statuses. Eligible after **COOLING_OFF_DAYS (120)** since the latest touch; hard suppressions first (unsubscribed, bounced, open deal, excluded lost reasons, customers, recycle cap). Cooled-off contacts are re-verified (email + job title) and routed to an outbound **sequence** or **nurture**.\n\nOpt-ins: `SANDBOX_MODE=false` → `DRY_RUN=false` + `HUBSPOT_WRITES_ENABLED=true` (stamps) → `SEQUENCE_ENROLLMENT_ENABLED=true` / `NURTURE_ROUTING_ENABLED=true`. Enrichment needs `ENRICHMENT_ENABLED=true`. Tokens only via `$env`. See README.md.\n\nFull text: DISCLAIMER.md · Licensed under the MIT License. License: MIT © 2026 dhRobin Systems · Provided as-is, see the disclaimer.",
+        "height": 460,
+        "width": 640,
+        "color": 4
+      },
+      "id": "d704841c-4326-43cc-a2a6-75ed845d85b1",
+      "name": "Safety Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -560,
+        -640
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "10b113e2-c0ed-4421-a70c-b2b16c63216c",
+      "name": "Manual Test Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -520,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "41 6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "e8793a5d-5c1b-47ce-a563-ae21b0c92b97",
+      "name": "Daily Recycle Run (06:41)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -520,
+        200
+      ],
+      "notes": "Daily at 06:41 in the instance time zone. Ships inactive."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Full text: DISCLAIMER.md · Licensed under the MIT License. License: MIT © 2026 dhRobin Systems · Provided as-is, see the disclaimer.\n// ============================================================================\n// Config & Safety Gate\n// Env-only configuration for the dead-lead recycling router.\n//   * Safe-ON  flags (SANDBOX_MODE, DRY_RUN, REQUIRE_VERIFIED_EMAIL_FOR_OUTBOUND)\n//     turn OFF only on false/0/no/off.\n//   * Safe-OFF flags (HUBSPOT_WRITES_ENABLED, SEQUENCE_ENROLLMENT_ENABLED,\n//     NURTURE_ROUTING_ENABLED, ENRICHMENT_ENABLED, UPDATE_JOB_TITLE, ...) turn\n//     ON only on true/1/yes/on. Typos keep the safe value. Blocked $env => sandbox.\n// Tokens never leave this node: only \"is set\" booleans do.\n// ============================================================================\nconst TRUTHY = ['true', '1', 'yes', 'on'];\nconst FALSY = ['false', '0', 'no', 'off'];\nlet envBlocked = false;\nfunction readEnv(key) {\n  try {\n    const v = $env[key];\n    return v === undefined || v === null ? '' : String(v).trim();\n  } catch (e) {\n    envBlocked = true;\n    return '';\n  }\n}\nconst str = (k, d = '') => readEnv(k) || d;\nconst safeOn = (k) => !FALSY.includes(readEnv(k).toLowerCase());\nconst safeOff = (k) => TRUTHY.includes(readEnv(k).toLowerCase());\nconst list = (k, d = '') => (readEnv(k).toLowerCase() === 'none' ? '' : readEnv(k) || d).split(',').map((s) => s.trim()).filter(Boolean);\nconst configErrors = [];\nconst warnings = [];\nconst intIn = (k, d, min, max) => {\n  const raw = readEnv(k);\n  if (raw === '') return d;\n  const n = Number(raw);\n  if (!/^-?\\d+$/.test(raw) || n < min || n > max) { configErrors.push(`${k} must be an integer ${min}-${max} (got \"${raw}\")`); return d; }\n  return n;\n};\nfunction jsonEnv(k, fallback) {\n  const raw = readEnv(k);\n  if (!raw) return fallback;\n  if (raw.length > 100000) { configErrors.push(`${k} is larger than 100 KB`); return fallback; }\n  try {\n    const v = JSON.parse(raw);\n    if (!v || typeof v !== 'object' || Array.isArray(v)) { configErrors.push(`${k} must be a JSON object`); return fallback; }\n    return v;\n  } catch (e) { configErrors.push(`${k} is not valid JSON: ${e.message}`); return fallback; }\n}\nfunction regexEnv(k, d) {\n  const s = readEnv(k) === '' ? d : readEnv(k);\n  if (s === '' || s.toLowerCase() === 'none') return '';\n  if (s.length > 400) { configErrors.push(`${k} is longer than 400 characters`); return d; }\n  if (/\\([^)]*[+*][^)]*\\)[+*{]/.test(s) || /\\\\\\d/.test(s)) { configErrors.push(`${k}: nested quantifiers / backreferences are not allowed`); return d; }\n  try { new RegExp(s, 'i'); } catch (e) { configErrors.push(`${k}: ${e.message}`); return d; }\n  return s;\n}\nconst ID_RE = /^\\d{1,18}$/;\nconst EMAIL_RE = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}$/i;\n\n// ---- Flags --------------------------------------------------------------------\nconst sandboxMode = safeOn('SANDBOX_MODE');\nconst dryRun = safeOn('DRY_RUN');\nconst writesEnabled = safeOff('HUBSPOT_WRITES_ENABLED');\nconst sequenceEnabled = safeOff('SEQUENCE_ENROLLMENT_ENABLED');\nconst nurtureEnabled = safeOff('NURTURE_ROUTING_ENABLED');\nconst enrichmentEnabled = safeOff('ENRICHMENT_ENABLED');\nconst hasHubspotToken = readEnv('HUBSPOT_PRIVATE_APP_TOKEN') !== '';\nconst hasEnrichmentKey = readEnv('ENRICHMENT_API_KEY') !== '';\nif (!sandboxMode && !hasHubspotToken) throw new Error('Live mode (SANDBOX_MODE=false) refused: HUBSPOT_PRIVATE_APP_TOKEN is not set. Set it or keep SANDBOX_MODE=true.');\n\nconst nowMs = (() => { const o = str('NOW_OVERRIDE'); return o && !Number.isNaN(Date.parse(o)) ? Date.parse(o) : Date.now(); })();\nconst DAY = 86400000;\n\n// ---- Hosts ------------------------------------------------------------------------\nfunction checkBase(key, def, allowKey, allowDef, withPath) {\n  const v = str(key, def).replace(/\\/+$/, '');\n  if (!v) return null;\n  const allowed = list(allowKey, allowDef).map((h) => h.toLowerCase());\n  const m = v.match(withPath ? /^(https?):\\/\\/([a-z0-9.-]+)(?::(\\d{1,5}))?(\\/[A-Za-z0-9._~\\/-]*)?$/i : /^(https?):\\/\\/([a-z0-9.-]+)(?::(\\d{1,5}))?$/i);\n  if (!m) { configErrors.push(`${key} must be scheme://host[:port]${withPath ? '[/path]' : ''} with no query string or credentials`); return null; }\n  const host = m[2].toLowerCase();\n  if (!allowed.some((s) => (s.startsWith('.') ? host.endsWith(s) : host === s))) { configErrors.push(`${key} host ${host} is not in ${allowKey}`); return null; }\n  if (m[1].toLowerCase() !== 'https' && !/^(127\\.0\\.0\\.1|localhost)$/.test(host)) { configErrors.push(`${key} must use https`); return null; }\n  return v;\n}\nconst hubspotBase = checkBase('HUBSPOT_API_BASE_URL', 'https://api.hubapi.com', 'HUBSPOT_ALLOWED_HOSTS', 'api.hubapi.com,api-eu1.hubapi.com', false);\n\n// ---- Cooling-off and population ----------------------------------------------------\nconst coolingDays = intIn('COOLING_OFF_DAYS', 120, 1, 3650);\nconst lookbackDays = intIn('LOOKBACK_DAYS', 730, 1, 3650);\nconst reevaluateDays = intIn('REEVALUATION_INTERVAL_DAYS', 30, 0, 3650);\nconst maxRecycles = intIn('MAX_RECYCLES', 2, 1, 50);\nconst closedLostStages = list('CLOSED_LOST_STAGES', 'closedlost');\nconst dqStatuses = list('DISQUALIFIED_LEAD_STATUSES', 'UNQUALIFIED,BAD_TIMING');\nconst dqDateProp = str('DISQUALIFIED_DATE_PROPERTY', 'recycle_disqualified_at');\nif (!/^[a-z][a-z0-9_]{0,99}$/.test(dqDateProp)) configErrors.push('DISQUALIFIED_DATE_PROPERTY must be a HubSpot internal property name');\nif (!closedLostStages.length && !dqStatuses.length) configErrors.push('Set CLOSED_LOST_STAGES and/or DISQUALIFIED_LEAD_STATUSES');\nconst cutoffMs = nowMs - coolingDays * DAY;\nconst lookbackStartMs = cutoffMs - lookbackDays * DAY;\n\n// ---- Qualification rules --------------------------------------------------------------\nconst rules = {\n  excludeLifecycle: list('EXCLUDE_LIFECYCLE_STAGES', 'customer,evangelist').map((s) => s.toLowerCase()),\n  excludeLostReasons: regexEnv('EXCLUDE_LOST_REASONS_REGEX', '\\\\b(do not contact|legal|fraud|spam|bankrupt|out of business)\\\\b'),\n  nurtureOnlyLostReasons: regexEnv('NURTURE_ONLY_LOST_REASONS_REGEX', '\\\\b(competitor|went with|chose|signed with|multi-year)\\\\b'),\n  outboundTitle: regexEnv('OUTBOUND_TITLE_REGEX', '\\\\b(chief|c[eotfmr]o|vp|vice president|head of|director|founder|co-founder|owner|president|partner)\\\\b'),\n  targetTitle: regexEnv('TARGET_TITLE_REGEX', '\\\\b(manager|lead|director|head|vp|chief|c[eotfmr]o|founder|owner|president|partner|specialist|architect|engineer)\\\\b'),\n  excludeTitle: regexEnv('EXCLUDE_TITLE_REGEX', '\\\\b(student|intern|retired|unemployed|freelance|job seeker)\\\\b'),\n  requireVerifiedForOutbound: safeOn('REQUIRE_VERIFIED_EMAIL_FOR_OUTBOUND'),\n  nurtureAllowRisky: safeOff('NURTURE_ALLOW_RISKY'),\n  updateJobTitle: safeOff('UPDATE_JOB_TITLE'),\n  setLeadStatusOnRoute: str('SET_LEAD_STATUS_ON_ROUTE', ''),\n};\nif (rules.setLeadStatusOnRoute && !/^[A-Z_]{2,40}$/.test(rules.setLeadStatusOnRoute)) configErrors.push('SET_LEAD_STATUS_ON_ROUTE must be a hs_lead_status internal value such as OPEN');\n\n// ---- Enrichment adapter ---------------------------------------------------------------\nconst enrichmentMode = str('ENRICHMENT_MODE', 'none').toLowerCase();\nif (!['none', 'http'].includes(enrichmentMode)) configErrors.push('ENRICHMENT_MODE must be none or http');\nconst enrichmentUrl = enrichmentMode === 'http' ? checkBase('ENRICHMENT_API_URL', '', 'ENRICHMENT_ALLOWED_HOSTS', '', true) : null;\nif (enrichmentMode === 'http' && !readEnv('ENRICHMENT_API_URL')) configErrors.push('ENRICHMENT_MODE=http requires ENRICHMENT_API_URL');\nconst authHeader = str('ENRICHMENT_AUTH_HEADER', 'Authorization');\nif (!/^[A-Za-z0-9-]{1,64}$/.test(authHeader)) configErrors.push('ENRICHMENT_AUTH_HEADER must be a header name');\nconst responseMap = { emailStatus: 'email_status', jobTitle: 'job_title', company: 'company', stillAtCompany: 'still_at_company', ...jsonEnv('ENRICHMENT_RESPONSE_MAP_JSON', {}) };\nfor (const [k, v] of Object.entries(responseMap)) if (typeof v !== 'string' || !/^[A-Za-z0-9_.\\[\\]-]{1,120}$/.test(v)) configErrors.push(`ENRICHMENT_RESPONSE_MAP_JSON.${k} must be a dotted path`);\nconst statusMap = { valid: 'VALID', deliverable: 'VALID', ok: 'VALID', invalid: 'INVALID', undeliverable: 'INVALID', bounced: 'INVALID', risky: 'RISKY', catch_all: 'RISKY', 'accept_all': 'RISKY', unknown: 'UNKNOWN', ...jsonEnv('ENRICHMENT_EMAIL_STATUS_MAP_JSON', {}) };\nfor (const [k, v] of Object.entries(statusMap)) if (!['VALID', 'INVALID', 'RISKY', 'UNKNOWN'].includes(v)) configErrors.push(`ENRICHMENT_EMAIL_STATUS_MAP_JSON.${k} must map to VALID, INVALID, RISKY or UNKNOWN`);\nconst enrichmentBlockers = [];\nif (sandboxMode) enrichmentBlockers.push('SANDBOX_MODE=true (enrichment simulated from the fixture)');\nif (enrichmentMode !== 'http') enrichmentBlockers.push('ENRICHMENT_MODE is not http');\nif (!enrichmentEnabled) enrichmentBlockers.push('ENRICHMENT_ENABLED is not true');\nif (!hasEnrichmentKey) enrichmentBlockers.push('ENRICHMENT_API_KEY is not set');\nif (enrichmentMode === 'http' && !enrichmentUrl) enrichmentBlockers.push('ENRICHMENT_API_URL is invalid or not allowlisted');\n\n// ---- Routing targets ---------------------------------------------------------------------\nconst seqRaw = jsonEnv('SEQUENCE_MAP_JSON', {});\nconst sequenceMap = {};\nfor (const [k, v] of Object.entries(seqRaw)) { if (['CLOSED_LOST', 'DISQUALIFIED'].includes(k) && ID_RE.test(String(v))) sequenceMap[k] = String(v); else configErrors.push(`SEQUENCE_MAP_JSON.${String(k).slice(0, 30)} must be CLOSED_LOST or DISQUALIFIED -> numeric sequence id`); }\nconst senderRaw = jsonEnv('OWNER_SENDER_MAP_JSON', {});\nconst ownerSenders = {};\nfor (const [k, v] of Object.entries(senderRaw)) { if (ID_RE.test(k) && v && ID_RE.test(String(v.userId)) && EMAIL_RE.test(String(v.senderEmail || ''))) ownerSenders[k] = { userId: String(v.userId), senderEmail: String(v.senderEmail) }; else configErrors.push(`OWNER_SENDER_MAP_JSON.${String(k).slice(0, 30)} needs {\"userId\":\"…\",\"senderEmail\":\"…\"}`); }\nconst defaultSender = readEnv('DEFAULT_SENDER_USER_ID') || readEnv('DEFAULT_SENDER_EMAIL') ? { userId: readEnv('DEFAULT_SENDER_USER_ID'), senderEmail: readEnv('DEFAULT_SENDER_EMAIL') } : null;\nif (defaultSender && (!ID_RE.test(defaultSender.userId) || !EMAIL_RE.test(defaultSender.senderEmail))) configErrors.push('DEFAULT_SENDER_USER_ID must be numeric and DEFAULT_SENDER_EMAIL a valid address (both required)');\nconst nurtureListId = readEnv('NURTURE_LIST_ID');\nif (nurtureListId && !ID_RE.test(nurtureListId)) configErrors.push('NURTURE_LIST_ID must be a numeric HubSpot list id');\n\nconst caps = {\n  outboundPerRun: intIn('MAX_OUTBOUND_PER_RUN', 50, 0, 10000),\n  outboundPerOwner: intIn('MAX_OUTBOUND_PER_OWNER', 15, 0, 10000),\n  nurturePerRun: intIn('MAX_NURTURE_PER_RUN', 500, 0, 100000),\n  enrichmentPerRun: intIn('ENRICHMENT_MAX_PER_RUN', 200, 0, 10000),\n};\nconst searchPageSize = intIn('HUBSPOT_SEARCH_PAGE_SIZE', 200, 10, 200);\n\n// ---- Write gates -------------------------------------------------------------------------\nconst baseBlockers = [];\nif (sandboxMode) baseBlockers.push('SANDBOX_MODE=true (synthetic fixture, nothing is written)');\nif (dryRun) baseBlockers.push('DRY_RUN=true (routing report only)');\nif (envBlocked) baseBlockers.push('n8n blocked $env access');\nif (configErrors.length) baseBlockers.push(`${configErrors.length} configuration error(s)`);\nconst gate = (flag, label, extra = []) => { const b = [...baseBlockers, ...(flag ? [] : [`${label} is not true`]), ...extra]; return { allowed: b.length === 0, blockers: b }; };\nconst writesGate = gate(writesEnabled, 'HUBSPOT_WRITES_ENABLED');\nconst sequenceGate = gate(sequenceEnabled && writesEnabled, 'SEQUENCE_ENROLLMENT_ENABLED (+ HUBSPOT_WRITES_ENABLED)', Object.keys(sequenceMap).length ? [] : ['SEQUENCE_MAP_JSON is empty']);\nconst nurtureGate = gate(nurtureEnabled && writesEnabled, 'NURTURE_ROUTING_ENABLED (+ HUBSPOT_WRITES_ENABLED)');\nif (!Object.keys(sequenceMap).length) warnings.push('SEQUENCE_MAP_JSON is empty: outbound-qualified contacts are routed to nurture instead (flag OUTBOUND_UNAVAILABLE).');\nif (enrichmentMode === 'none') warnings.push('ENRICHMENT_MODE=none: emails are only screened with HubSpot bounce / opt-out signals and count as UNVERIFIED; with REQUIRE_VERIFIED_EMAIL_FOR_OUTBOUND=true nobody is routed to a sequence.');\n\nconst CONTACT_PROPS = ['email', 'firstname', 'lastname', 'jobtitle', 'company', 'hs_lead_status', 'lifecyclestage', 'hubspot_owner_id', 'hs_email_optout', 'hs_email_hard_bounce_reason_enum', 'hs_email_bad_address', 'hs_email_quarantined', 'notes_last_contacted', 'hs_last_sales_activity_timestamp', 'hs_sales_email_last_replied', 'createdate', 'recycle_status', 'recycle_route', 'recycle_reason', 'recycle_count', 'recycle_last_evaluated_at', 'recycle_last_routed_at', 'recycle_eligible_on', 'recycle_email_status', dqDateProp];\nconst DEAL_PROPS = ['dealstage', 'pipeline', 'closedate', 'closed_lost_reason', 'hs_is_closed', 'hubspot_owner_id'];\nconst config = {\n  runId: 'rcy-' + new Date(nowMs).toISOString().replace(/[-:.TZ]/g, '').slice(0, 14) + '-' + Math.random().toString(36).slice(2, 8),\n  now: new Date(nowMs).toISOString(),\n  nowMs,\n  envBlocked,\n  sandboxMode,\n  dryRun,\n  cooling: { days: coolingDays, cutoffMs, cutoffIso: new Date(cutoffMs).toISOString(), lookbackDays, lookbackStartIso: new Date(lookbackStartMs).toISOString(), reevaluateDays, maxRecycles },\n  population: { closedLostStages, dqStatuses, dqDateProp },\n  rules,\n  enrichment: { mode: enrichmentMode, url: enrichmentUrl, authHeader, authPrefix: readEnv('ENRICHMENT_AUTH_PREFIX').toLowerCase() === 'none' ? '' : (readEnv('ENRICHMENT_AUTH_PREFIX') || 'Bearer') + ' ', responseMap, statusMap, sendName: safeOn('ENRICHMENT_SEND_NAME'), allowed: enrichmentBlockers.length === 0 && configErrors.length === 0, blockers: enrichmentBlockers, keySet: hasEnrichmentKey, timeoutMs: intIn('ENRICHMENT_TIMEOUT_MS', 15000, 1000, 120000) },\n  routing: { sequenceMap, ownerSenders, defaultSender, nurtureListId: nurtureListId || null },\n  caps,\n  hubspot: {\n    base: hubspotBase,\n    tokenSet: hasHubspotToken,\n    pageSize: searchPageSize,\n    contactProps: CONTACT_PROPS,\n    dealProps: DEAL_PROPS,\n    searches: {\n      deals: { url: `${hubspotBase}/crm/v3/objects/deals/search`, body: { filterGroups: [{ filters: [{ propertyName: 'dealstage', operator: 'IN', values: closedLostStages.length ? closedLostStages : ['__none__'] }, { propertyName: 'closedate', operator: 'LTE', value: String(cutoffMs) }, { propertyName: 'closedate', operator: 'GTE', value: String(lookbackStartMs) }] }], properties: DEAL_PROPS, sorts: [{ propertyName: 'closedate', direction: 'ASCENDING' }], limit: searchPageSize } },\n      contacts: { url: `${hubspotBase}/crm/v3/objects/contacts/search`, body: { filterGroups: [{ filters: [{ propertyName: 'hs_lead_status', operator: 'IN', values: dqStatuses.length ? dqStatuses : ['__none__'] }] }], properties: ['hs_lead_status'], sorts: [{ propertyName: 'hs_object_id', direction: 'ASCENDING' }], limit: searchPageSize } },\n    },\n    maxSearchResults: 10000,\n  },\n  writes: { hubspot: writesGate, sequence: sequenceGate, nurture: nurtureGate },\n  configErrors,\n  warnings,\n};\nconst safetyDecisions = [\n  `Mode: ${sandboxMode ? 'SANDBOX (synthetic fixture, zero network calls)' : dryRun ? 'LIVE DRY-RUN (read-only HubSpot discovery; enrichment only if ENRICHMENT_ENABLED)' : 'LIVE'}`,\n  `Cooling-off: ${coolingDays} days (last touch before ${config.cooling.cutoffIso}); closed-lost lookback ${lookbackDays} days; re-evaluate every ${reevaluateDays} days; max ${maxRecycles} recycles`,\n  `Enrichment: ${config.enrichment.allowed ? 'ARMED (' + enrichmentMode + ')' : 'OFF (' + enrichmentBlockers.join('; ') + ')'}`,\n  `Contact stamps: ${writesGate.allowed ? 'ARMED' : 'BLOCKED'} · Sequence enrollment: ${sequenceGate.allowed ? 'ARMED' : 'BLOCKED'} · Nurture routing: ${nurtureGate.allowed ? 'ARMED' : 'BLOCKED'}`,\n  `Caps: ${caps.outboundPerRun} outbound / run, ${caps.outboundPerOwner} per owner, ${caps.nurturePerRun} nurture / run, ${caps.enrichmentPerRun} enrichments / run`,\n];\nreturn [{ json: { config, safetyDecisions } }];\n"
+      },
+      "id": "4f02b78d-0713-49c8-a168-c405daff3764",
+      "name": "Config & Safety Gate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -280,
+        100
+      ],
+      "notes": "Env-only config, cooling-off window, qualification rules, enrichment adapter, routing targets, caps, write gates."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "295fccf6-aab2-4a0e-aa26-53aafae9e60c",
+              "leftValue": "={{ $('Config & Safety Gate').first().json.config.sandboxMode }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "89bff4a9-4f76-4723-ae1e-39fdc4f96730",
+      "name": "Sandbox Mode?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -60,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Full text: DISCLAIMER.md · Licensed under the MIT License. License: MIT © 2026 dhRobin Systems · Provided as-is, see the disclaimer.\n// ============================================================================\n// Load Synthetic Recycle Fixture  (SANDBOX_MODE only; zero network calls)\n// Fictitious deals, contacts and associations. Dates are stored relative to\n// \"now\" (\"@daysAgo:150\") so sandbox results do not drift with the calendar.\n// The same search filters as the live HubSpot searches are applied here.\n// ============================================================================\nconst { config } = $('Config & Safety Gate').first().json;\nconst FIXTURE = {\n  \"_meta\": {\n    \"synthetic\": true,\n    \"description\": \"Fully synthetic HubSpot deals, contacts, associations and enrichment responses for the dead-lead recycler. Fictitious people at example.com, placeholder ids. Dates are relative to now (@daysAgo:N).\",\n    \"scenarios\": {\n      \"51000001\": \"Closed-lost 150 d ago (budget), VP, valid -> OUTBOUND closed-lost sequence\",\n      \"51000002\": \"Closed-lost 150 d ago, Marketing Manager -> NURTURE\",\n      \"51000003\": \"Closed-lost only 60 d ago -> not in population yet\",\n      \"51000004\": \"Lost to a competitor, Director -> NURTURE (nurture-only lost reason)\",\n      \"51000005\": \"Lost reason 'Do not contact - legal' -> SUPPRESS\",\n      \"51000006\": \"Has an open deal -> SUPPRESS OPEN_DEAL\",\n      \"51000007\": \"Contacted 30 d ago -> COOLING (clock restarted by last touch)\",\n      \"51000008\": \"Closed-lost 1000 d ago, outside LOOKBACK_DAYS -> not in population\",\n      \"51000009\": \"Enrichment: no longer at the company -> SUPPRESS LEFT_COMPANY (job changer)\",\n      \"51000010\": \"Enrichment: undeliverable -> SUPPRESS EMAIL_INVALID_VERIFIED\",\n      \"51000011\": \"Unsubscribed from all email -> SUPPRESS\",\n      \"51000012\": \"Hard bounce in HubSpot -> SUPPRESS\",\n      \"51000013\": \"Customer lifecycle stage -> SUPPRESS\",\n      \"51000014\": \"Disqualified 200 d ago, Founder -> OUTBOUND disqualified sequence (owner 2)\",\n      \"51000015\": \"Bad timing, title Student -> SUPPRESS TITLE_EXCLUDED\",\n      \"51000016\": \"Disqualified, no reference date at all -> HOLD NO_REFERENCE_DATE\",\n      \"51000017\": \"Enrichment timeout -> HOLD ENRICHMENT_FAILED (retried next run)\",\n      \"51000018\": \"Already recycled twice -> SUPPRESS MAX_RECYCLES_REACHED\",\n      \"51000019\": \"Evaluated 10 d ago -> SKIP RECENTLY_EVALUATED\",\n      \"51000020\": \"Office Assistant -> SUPPRESS OFF_PERSONA\",\n      \"51000021\": \"Catch-all email -> HOLD EMAIL_RISKY\",\n      \"51000022\": \"recycle_status DO_NOT_RECYCLE -> SUPPRESS\",\n      \"51000023\": \"Title changed to VP Growth -> OUTBOUND, JOB_TITLE_CHANGED\",\n      \"51000024\": \"Recycled to nurture 100 d ago -> COOLING (clock from last recycle)\",\n      \"51000025\": \"No owner, Director of IT -> OUTBOUND via default sender (already in an active sequence in the live mock)\",\n      \"51000026\": \"No email -> SUPPRESS NO_EMAIL\"\n    }\n  },\n  \"sandboxRouting\": {\n    \"sequenceMap\": {\n      \"CLOSED_LOST\": \"31000001\",\n      \"DISQUALIFIED\": \"31000002\"\n    },\n    \"ownerSenders\": {\n      \"61000001\": {\n        \"userId\": \"62000001\",\n        \"senderEmail\": \"avery.rep@example.com\"\n      },\n      \"61000002\": {\n        \"userId\": \"62000002\",\n        \"senderEmail\": \"blake.rep@example.com\"\n      }\n    },\n    \"defaultSender\": {\n      \"userId\": \"62000009\",\n      \"senderEmail\": \"sdr.team@example.com\"\n    },\n    \"nurtureListId\": \"71000001\"\n  },\n  \"deals\": [\n    {\n      \"id\": \"41000001\",\n      \"properties\": {\n        \"dealstage\": \"closedlost\",\n        \"pipeline\": \"default\",\n        \"closedate\": \"@daysAgo:150\",\n        \"closed_lost_reason\": \"Budget freeze until next fiscal year\",\n        \"hs_is_closed\": \"true\",\n        \"hubspot_owner_id\": \"61000001\"\n      }\n    },\n    {\n      \"id\": \"41000002\",\n      \"properties\": {\n        \"dealstage\": \"closedlost\",\n        \"pipeline\": \"default\",\n        \"closedate\": \"@daysAgo:60\",\n        \"closed_lost_reason\": \"Timing\",\n        \"hs_is_closed\": \"true\",\n        \"hubspot_owner_id\": \"61000001\"\n      }\n    },\n    {\n      \"id\": \"41000003\",\n      \"properties\": {\n        \"dealstage\": \"closedlost\",\n        \"pipeline\": \"default\",\n        \"closedate\": \"@daysAgo:200\",\n        \"closed_lost_reason\": \"Went with a competitor\",\n        \"hs_is_closed\": \"true\",\n        \"hubspot_owner_id\": \"61000001\"\n      }\n    },\n    {\n      \"id\": \"41000004\",\n      \"properties\": {\n        \"dealstage\": \"closedlost\",\n        \"pipeline\": \"default\",\n        \"closedate\": \"@daysAgo:300\",\n        \"closed_lost_reason\": \"Do not contact - legal request\",\n        \"hs_is_closed\": \"true\",\n        \"hubspot_owner_id\": \"61000001\"\n      }\n    },\n    {\n      \"id\": \"41000005\",\n      \"properties\": {\n        \"dealstage\": \"closedlost\",\n        \"pipeline\": \"default\",\n        \"closedate\": \"@daysAgo:400\",\n        \"closed_lost_reason\": \"No decision made\",\n        \"hs_is_closed\": \"true\",\n        \"hubspot_owner_id\": \"61000001\"\n      }\n    },\n    {\n      \"id\": \"41000006\",\n      \"properties\": {\n        \"dealstage\": \"appointmentscheduled\",\n        \"pipeline\": \"default\",\n        \"closedate\": \"@daysAgo:-30\",\n        \"closed_lost_reason\": null,\n        \"hs_is_closed\": \"false\",\n        \"hubspot_owner_id\": \"61000001\"\n      }\n    },\n    {\n      \"id\": \"41000007\",\n      \"properties\": {\n        \"dealstage\": \"closedlost\",\n        \"pipeline\": \"default\",\n        \"closedate\": \"@daysAgo:1000\",\n        \"closed_lost_reason\": \"Timing\",\n        \"hs_is_closed\": \"true\",\n        \"hubspot_owner_id\": \"61000001\"\n      }\n    },\n    {\n      \"id\": \"41000008\",\n      \"properties\": {\n        \"dealstage\": \"closedlost\",\n        \"pipeline\": \"default\",\n        \"closedate\": \"@daysAgo:180\",\n        \"closed_lost_reason\": \"Timing - revisit later\",\n        \"hs_is_closed\": \"true\",\n        \"hubspot_owner_id\": \"61000001\"\n      }\n    },\n    {\n      \"id\": \"41000009\",\n      \"properties\": {\n        \"dealstage\": \"closedwon\",\n        \"pipeline\": \"default\",\n        \"closedate\": \"@daysAgo:250\",\n        \"closed_lost_reason\": null,\n        \"hs_is_closed\": \"true\",\n        \"hubspot_owner_id\": \"61000001\"\n      }\n    },\n    {\n      \"id\": \"41000010\",\n      \"properties\": {\n        \"dealstage\": \"closedlost\",\n        \"pipeline\": \"default\",\n        \"closedate\": \"@daysAgo:200\",\n        \"closed_lost_reason\": \"Pricing\",\n        \"hs_is_closed\": \"true\",\n        \"hubspot_owner_id\": \"61000001\"\n      }\n    }\n  ],\n  \"contacts\": [\n    {\n      \"id\": \"51000001\",\n      \"properties\": {\n        \"email\": \"avery.example1@example.com\",\n        \"firstname\": \"Avery\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"VP of Operations\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": null,\n        \"lifecyclestage\": \"opportunity\",\n        \"hubspot_owner_id\": \"61000001\",\n        \"createdate\": \"@daysAgo:900\",\n        \"notes_last_contacted\": \"@daysAgo:140\"\n      }\n    },\n    {\n      \"id\": \"51000002\",\n      \"properties\": {\n        \"email\": \"blake.example2@example.com\",\n        \"firstname\": \"Blake\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"Marketing Manager\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": null,\n        \"lifecyclestage\": \"opportunity\",\n        \"hubspot_owner_id\": \"61000001\",\n        \"createdate\": \"@daysAgo:900\",\n        \"notes_last_contacted\": \"@daysAgo:150\"\n      }\n    },\n    {\n      \"id\": \"51000003\",\n      \"properties\": {\n        \"email\": \"casey.example3@example.com\",\n        \"firstname\": \"Casey\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"Director of Finance\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": null,\n        \"lifecyclestage\": \"opportunity\",\n        \"hubspot_owner_id\": \"61000001\",\n        \"createdate\": \"@daysAgo:900\"\n      }\n    },\n    {\n      \"id\": \"51000004\",\n      \"properties\": {\n        \"email\": \"drew.example4@example.com\",\n        \"firstname\": \"Drew\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"Director of Procurement\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": null,\n        \"lifecyclestage\": \"opportunity\",\n        \"hubspot_owner_id\": \"61000001\",\n        \"createdate\": \"@daysAgo:900\"\n      }\n    },\n    {\n      \"id\": \"51000005\",\n      \"properties\": {\n        \"email\": \"emery.example5@example.com\",\n        \"firstname\": \"Emery\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"Head of IT\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": null,\n        \"lifecyclestage\": \"opportunity\",\n        \"hubspot_owner_id\": \"61000001\",\n        \"createdate\": \"@daysAgo:900\"\n      }\n    },\n    {\n      \"id\": \"51000006\",\n      \"properties\": {\n        \"email\": \"finley.example6@example.com\",\n        \"firstname\": \"Finley\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"VP Engineering\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": null,\n        \"lifecyclestage\": \"opportunity\",\n        \"hubspot_owner_id\": \"61000001\",\n        \"createdate\": \"@daysAgo:900\"\n      }\n    },\n    {\n      \"id\": \"51000007\",\n      \"properties\": {\n        \"email\": \"gray.example7@example.com\",\n        \"firstname\": \"Gray\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"Head of Sales\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": null,\n        \"lifecyclestage\": \"opportunity\",\n        \"hubspot_owner_id\": \"61000001\",\n        \"createdate\": \"@daysAgo:900\",\n        \"notes_last_contacted\": \"@daysAgo:30\"\n      }\n    },\n    {\n      \"id\": \"51000008\",\n      \"properties\": {\n        \"email\": \"harper.example8@example.com\",\n        \"firstname\": \"Harper\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"Director of Data\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": null,\n        \"lifecyclestage\": \"opportunity\",\n        \"hubspot_owner_id\": \"61000001\",\n        \"createdate\": \"@daysAgo:900\"\n      }\n    },\n    {\n      \"id\": \"51000009\",\n      \"properties\": {\n        \"email\": \"indy.example9@example.com\",\n        \"firstname\": \"Indy\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"Chief Revenue Officer\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": null,\n        \"lifecyclestage\": \"opportunity\",\n        \"hubspot_owner_id\": \"61000001\",\n        \"createdate\": \"@daysAgo:900\"\n      }\n    },\n    {\n      \"id\": \"51000010\",\n      \"properties\": {\n        \"email\": \"jules.example10@example.com\",\n        \"firstname\": \"Jules\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"Director of Marketing\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": null,\n        \"lifecyclestage\": \"opportunity\",\n        \"hubspot_owner_id\": \"61000001\",\n        \"createdate\": \"@daysAgo:900\"\n      }\n    },\n    {\n      \"id\": \"51000011\",\n      \"properties\": {\n        \"email\": \"kai.example11@example.com\",\n        \"firstname\": \"Kai\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"VP Finance\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": null,\n        \"lifecyclestage\": \"opportunity\",\n        \"hubspot_owner_id\": \"61000001\",\n        \"createdate\": \"@daysAgo:900\",\n        \"hs_email_optout\": \"true\"\n      }\n    },\n    {\n      \"id\": \"51000012\",\n      \"properties\": {\n        \"email\": \"logan.example12@example.com\",\n        \"firstname\": \"Logan\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"Head of Operations\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": null,\n        \"lifecyclestage\": \"opportunity\",\n        \"hubspot_owner_id\": \"61000001\",\n        \"createdate\": \"@daysAgo:900\",\n        \"hs_email_hard_bounce_reason_enum\": \"UNKNOWN_USER\"\n      }\n    },\n    {\n      \"id\": \"51000013\",\n      \"properties\": {\n        \"email\": \"morgan.example13@example.com\",\n        \"firstname\": \"Morgan\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"VP Customer Success\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": null,\n        \"lifecyclestage\": \"customer\",\n        \"hubspot_owner_id\": \"61000001\",\n        \"createdate\": \"@daysAgo:900\"\n      }\n    },\n    {\n      \"id\": \"51000014\",\n      \"properties\": {\n        \"email\": \"noel.example14@example.com\",\n        \"firstname\": \"Noel\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"Founder\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": \"UNQUALIFIED\",\n        \"lifecyclestage\": \"lead\",\n        \"hubspot_owner_id\": \"61000002\",\n        \"createdate\": \"@daysAgo:900\",\n        \"recycle_disqualified_at\": \"@daysAgo:200\"\n      }\n    },\n    {\n      \"id\": \"51000015\",\n      \"properties\": {\n        \"email\": \"oakley.example15@example.com\",\n        \"firstname\": \"Oakley\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"Student\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": \"BAD_TIMING\",\n        \"lifecyclestage\": \"lead\",\n        \"hubspot_owner_id\": \"61000002\",\n        \"createdate\": \"@daysAgo:900\",\n        \"recycle_disqualified_at\": \"@daysAgo:130\"\n      }\n    },\n    {\n      \"id\": \"51000016\",\n      \"properties\": {\n        \"email\": \"parker.example16@example.com\",\n        \"firstname\": \"Parker\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"Operations Manager\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": \"UNQUALIFIED\",\n        \"lifecyclestage\": \"lead\",\n        \"hubspot_owner_id\": \"61000001\",\n        \"createdate\": \"@daysAgo:900\"\n      }\n    },\n    {\n      \"id\": \"51000017\",\n      \"properties\": {\n        \"email\": \"quinn.example17@example.com\",\n        \"firstname\": \"Quinn\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"Director of Revenue Operations\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": \"UNQUALIFIED\",\n        \"lifecyclestage\": \"lead\",\n        \"hubspot_owner_id\": \"61000001\",\n        \"createdate\": \"@daysAgo:900\",\n        \"recycle_disqualified_at\": \"@daysAgo:300\"\n      }\n    },\n    {\n      \"id\": \"51000018\",\n      \"properties\": {\n        \"email\": \"reese.example18@example.com\",\n        \"firstname\": \"Reese\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"VP Sales\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": \"UNQUALIFIED\",\n        \"lifecyclestage\": \"lead\",\n        \"hubspot_owner_id\": \"61000001\",\n        \"createdate\": \"@daysAgo:900\",\n        \"recycle_disqualified_at\": \"@daysAgo:250\",\n        \"recycle_count\": \"2\"\n      }\n    },\n    {\n      \"id\": \"51000019\",\n      \"properties\": {\n        \"email\": \"sage.example19@example.com\",\n        \"firstname\": \"Sage\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"Director of Product\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": \"UNQUALIFIED\",\n        \"lifecyclestage\": \"lead\",\n        \"hubspot_owner_id\": \"61000001\",\n        \"createdate\": \"@daysAgo:900\",\n        \"recycle_disqualified_at\": \"@daysAgo:250\",\n        \"recycle_status\": \"SUPPRESSED\",\n        \"recycle_reason\": \"OFF_PERSONA\",\n        \"recycle_last_evaluated_at\": \"@daysAgo:10\"\n      }\n    },\n    {\n      \"id\": \"51000020\",\n      \"properties\": {\n        \"email\": \"tatum.example20@example.com\",\n        \"firstname\": \"Tatum\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"Office Assistant\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": \"UNQUALIFIED\",\n        \"lifecyclestage\": \"lead\",\n        \"hubspot_owner_id\": \"61000001\",\n        \"createdate\": \"@daysAgo:900\",\n        \"recycle_disqualified_at\": \"@daysAgo:400\"\n      }\n    },\n    {\n      \"id\": \"51000021\",\n      \"properties\": {\n        \"email\": \"umber.example21@example.com\",\n        \"firstname\": \"Umber\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"Engineering Manager\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": \"UNQUALIFIED\",\n        \"lifecyclestage\": \"lead\",\n        \"hubspot_owner_id\": \"61000001\",\n        \"createdate\": \"@daysAgo:900\",\n        \"recycle_disqualified_at\": \"@daysAgo:160\"\n      }\n    },\n    {\n      \"id\": \"51000022\",\n      \"properties\": {\n        \"email\": \"vale.example22@example.com\",\n        \"firstname\": \"Vale\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"Head of Partnerships\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": \"UNQUALIFIED\",\n        \"lifecyclestage\": \"lead\",\n        \"hubspot_owner_id\": \"61000001\",\n        \"createdate\": \"@daysAgo:900\",\n        \"recycle_disqualified_at\": \"@daysAgo:365\",\n        \"recycle_status\": \"DO_NOT_RECYCLE\"\n      }\n    },\n    {\n      \"id\": \"51000023\",\n      \"properties\": {\n        \"email\": \"wren.example23@example.com\",\n        \"firstname\": \"Wren\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"Head of Growth\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": \"UNQUALIFIED\",\n        \"lifecyclestage\": \"lead\",\n        \"hubspot_owner_id\": \"61000001\",\n        \"createdate\": \"@daysAgo:900\",\n        \"recycle_disqualified_at\": \"@daysAgo:200\"\n      }\n    },\n    {\n      \"id\": \"51000024\",\n      \"properties\": {\n        \"email\": \"xan.example24@example.com\",\n        \"firstname\": \"Xan\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"Director of Sales\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": \"BAD_TIMING\",\n        \"lifecyclestage\": \"lead\",\n        \"hubspot_owner_id\": \"61000002\",\n        \"createdate\": \"@daysAgo:900\",\n        \"recycle_disqualified_at\": \"@daysAgo:210\",\n        \"recycle_last_routed_at\": \"@daysAgo:100\",\n        \"recycle_count\": \"1\",\n        \"recycle_status\": \"RECYCLED_NURTURE\",\n        \"recycle_route\": \"NURTURE\"\n      }\n    },\n    {\n      \"id\": \"51000025\",\n      \"properties\": {\n        \"email\": \"yael.example25@example.com\",\n        \"firstname\": \"Yael\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"Director of IT\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": \"UNQUALIFIED\",\n        \"lifecyclestage\": \"lead\",\n        \"hubspot_owner_id\": null,\n        \"createdate\": \"@daysAgo:900\",\n        \"recycle_disqualified_at\": \"@daysAgo:180\"\n      }\n    },\n    {\n      \"id\": \"51000026\",\n      \"properties\": {\n        \"email\": null,\n        \"firstname\": \"Zion\",\n        \"lastname\": \"Example\",\n        \"jobtitle\": \"VP Marketing\",\n        \"company\": \"Example Co\",\n        \"hs_lead_status\": \"UNQUALIFIED\",\n        \"lifecyclestage\": \"lead\",\n        \"hubspot_owner_id\": \"61000001\",\n        \"createdate\": \"@daysAgo:900\",\n        \"recycle_disqualified_at\": \"@daysAgo:200\"\n      }\n    }\n  ],\n  \"associations\": {\n    \"dealContacts\": {\n      \"41000001\": [\n        \"51000001\",\n        \"51000002\"\n      ],\n      \"41000002\": [\n        \"51000003\"\n      ],\n      \"41000003\": [\n        \"51000004\"\n      ],\n      \"41000004\": [\n        \"51000005\"\n      ],\n      \"41000005\": [\n        \"51000006\",\n        \"51000007\"\n      ],\n      \"41000006\": [\n        \"51000006\"\n      ],\n      \"41000007\": [\n        \"51000008\"\n      ],\n      \"41000008\": [\n        \"51000009\",\n        \"51000010\",\n        \"51000011\",\n        \"51000012\"\n      ],\n      \"41000009\": [\n        \"51000013\"\n      ],\n      \"41000010\": [\n        \"51000013\"\n      ]\n    },\n    \"contactDeals\": {\n      \"51000001\": [\n        \"41000001\"\n      ],\n      \"51000002\": [\n        \"41000001\"\n      ],\n      \"51000003\": [\n        \"41000002\"\n      ],\n      \"51000004\": [\n        \"41000003\"\n      ],\n      \"51000005\": [\n        \"41000004\"\n      ],\n      \"51000006\": [\n        \"41000005\",\n        \"41000006\"\n      ],\n      \"51000007\": [\n        \"41000005\"\n      ],\n      \"51000008\": [\n        \"41000007\"\n      ],\n      \"51000009\": [\n        \"41000008\"\n      ],\n      \"51000010\": [\n        \"41000008\"\n      ],\n      \"51000011\": [\n        \"41000008\"\n      ],\n      \"51000012\": [\n        \"41000008\"\n      ],\n      \"51000013\": [\n        \"41000009\",\n        \"41000010\"\n      ]\n    }\n  },\n  \"enrichment\": {\n    \"avery.example1@example.com\": {\n      \"email_status\": \"valid\",\n      \"job_title\": \"VP of Operations\",\n      \"company\": \"Example Co\",\n      \"still_at_company\": true\n    },\n    \"blake.example2@example.com\": {\n      \"email_status\": \"valid\",\n      \"job_title\": \"Marketing Manager\",\n      \"company\": \"Example Co\",\n      \"still_at_company\": true\n    },\n    \"drew.example4@example.com\": {\n      \"email_status\": \"deliverable\",\n      \"job_title\": \"Director of Procurement\",\n      \"company\": \"Example Co\",\n      \"still_at_company\": true\n    },\n    \"indy.example9@example.com\": {\n      \"email_status\": \"valid\",\n      \"job_title\": \"Chief Revenue Officer\",\n      \"company\": \"Another Example Inc\",\n      \"still_at_company\": false\n    },\n    \"jules.example10@example.com\": {\n      \"email_status\": \"undeliverable\",\n      \"job_title\": \"Director of Marketing\",\n      \"still_at_company\": true\n    },\n    \"noel.example14@example.com\": {\n      \"email_status\": \"valid\",\n      \"job_title\": \"Founder\",\n      \"company\": \"Example Co\",\n      \"still_at_company\": true\n    },\n    \"oakley.example15@example.com\": {\n      \"email_status\": \"valid\",\n      \"job_title\": \"Student\",\n      \"still_at_company\": true\n    },\n    \"quinn.example17@example.com\": {\n      \"__error\": \"timeout of 15000ms exceeded (simulated)\"\n    },\n    \"tatum.example20@example.com\": {\n      \"email_status\": \"valid\",\n      \"job_title\": \"Office Assistant\",\n      \"still_at_company\": true\n    },\n    \"umber.example21@example.com\": {\n      \"email_status\": \"catch_all\",\n      \"job_title\": \"Engineering Manager\",\n      \"still_at_company\": true\n    },\n    \"wren.example23@example.com\": {\n      \"email_status\": \"valid\",\n      \"job_title\": \"VP Growth\",\n      \"company\": \"Example Co\",\n      \"still_at_company\": true\n    },\n    \"yael.example25@example.com\": {\n      \"email_status\": \"valid\",\n      \"job_title\": \"Director of IT\",\n      \"still_at_company\": true\n    }\n  },\n  \"activeEnrollments\": {\n    \"51000025\": {\n      \"id\": \"81000001\",\n      \"sequenceId\": \"31000099\",\n      \"enrolledAt\": \"@daysAgo:5\"\n    }\n  }\n};\nconst DAY = 86400000;\nconst resolve = (v) => {\n  if (typeof v !== 'string') return v;\n  const m = v.match(/^@daysAgo:(-?\\d+)(:date)?$/);\n  if (!m) return v;\n  const iso = new Date(config.nowMs - Number(m[1]) * DAY).toISOString();\n  return m[2] ? iso.slice(0, 10) : iso;\n};\nconst props = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, resolve(v)]));\nconst allDeals = Object.fromEntries(FIXTURE.deals.map((d) => [String(d.id), props(d.properties)]));\nconst lookbackStart = Date.parse(config.cooling.lookbackStartIso);\nconst searchDeals = Object.fromEntries(Object.entries(allDeals).filter(([, p]) => config.population.closedLostStages.includes(p.dealstage) && Date.parse(p.closedate) <= config.cooling.cutoffMs && Date.parse(p.closedate) >= lookbackStart));\nconst contacts = Object.fromEntries(FIXTURE.contacts.map((c) => [String(c.id), props(c.properties)]));\nconst dqIds = Object.entries(contacts).filter(([, p]) => config.population.dqStatuses.includes(p.hs_lead_status)).map(([id]) => id);\nconst dealContacts = Object.fromEntries(Object.keys(searchDeals).map((d) => [d, FIXTURE.associations.dealContacts[d] || []]));\nconst candidateIds = new Set(dqIds);\nfor (const l of Object.values(dealContacts)) for (const c of l) candidateIds.add(c);\nconst contactDeals = {};\nconst deals = { ...searchDeals };\nfor (const c of candidateIds) { contactDeals[c] = FIXTURE.associations.contactDeals[c] || []; for (const d of contactDeals[c]) deals[d] = allDeals[d]; }\nreturn [{ json: {\n  source: 'synthetic-fixture',\n  closedLostDealIds: Object.keys(searchDeals),\n  deals,\n  dealContacts,\n  dqIds,\n  contacts: Object.fromEntries([...candidateIds].map((c) => [c, contacts[c]])),\n  contactDeals,\n  sandbox: { enrichment: FIXTURE.enrichment, activeEnrollments: FIXTURE.activeEnrollments, routing: FIXTURE.sandboxRouting },\n} }];\n"
+      },
+      "id": "27f15d22-1ae3-4667-a8e7-8bec223325b2",
+      "name": "Load Synthetic Recycle Fixture",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        -160
+      ],
+      "notes": "SANDBOX only: fictitious deals / contacts with dates relative to now."
+    },
+    {
+      "parameters": {
+        "sendHeaders": true,
+        "method": "POST",
+        "url": "={{ $('Config & Safety Gate').first().json.config.hubspot.searches.deals.url }}",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.HUBSPOT_PRIVATE_APP_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Config & Safety Gate').first().json.config.hubspot.searches.deals.body) }}",
+        "options": {
+          "timeout": 30000,
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "body",
+                    "name": "after",
+                    "value": "={{ $response.body.paging && $response.body.paging.next ? $response.body.paging.next.after : undefined }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body.paging || !$response.body.paging.next || !$response.body.paging.next.after }}",
+              "limitPagesFetched": true,
+              "maxRequests": 50,
+              "requestInterval": 250
+            }
+          }
+        }
+      },
+      "id": "c9d0477b-74ef-41a5-a5c7-7586a339bc31",
+      "name": "HubSpot: Search Closed-Lost Deals",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        160,
+        320
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "notes": "Read-only: closed-lost stages with close date between lookback start and the cooling-off cutoff."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Full text: DISCLAIMER.md · Licensed under the MIT License. License: MIT © 2026 dhRobin Systems · Provided as-is, see the disclaimer.\n// ============================================================================\n// Collect Closed-Lost Deals & Build Association Reads\n// Validates every search page and fails closed when HubSpot reports 10,000+\n// matches (the search API cannot page further) or pagination was truncated.\n// Emits one v4 batch-read item per 100 deals (deal -> contacts), or a noop.\n// ============================================================================\nconst { config } = $('Config & Safety Gate').first().json;\nconst pages = $input.all().map((i) => i.json);\nconst deals = {};\nlet total = 0;\nfor (const [i, p] of pages.entries()) {\n  if (!p || !Array.isArray(p.results)) throw new Error(`Closed-lost deal search page ${i + 1} is malformed; nothing evaluated.`);\n  total = Math.max(total, Number(p.total) || 0);\n  for (const d of p.results) deals[String(d.id)] = d.properties || {};\n}\nif (total >= config.hubspot.maxSearchResults) throw new Error(`HubSpot reports ${total} closed-lost deals in the window (search API limit 10,000). Narrow LOOKBACK_DAYS; nothing evaluated.`);\nconst last = pages[pages.length - 1] || {};\nif (last.paging && last.paging.next && last.paging.next.after) throw new Error('Closed-lost deal search pagination stopped early; nothing evaluated.');\nif (Object.keys(deals).length < total) throw new Error(`Closed-lost deal search returned ${Object.keys(deals).length} of ${total} deals; nothing evaluated.`);\nconst ids = Object.keys(deals).sort();\nconst items = [];\nfor (let i = 0; i < ids.length; i += 100) items.push({ json: { url: `${config.hubspot.base}/crm/v4/associations/deals/contacts/batch/read`, body: { inputs: ids.slice(i, i + 100).map((id) => ({ id })) }, deals } });\nreturn items.length ? items : [{ json: { noop: true, deals } }];\n"
+      },
+      "id": "172c4c60-639d-4a9c-ae1a-a3599eea50f2",
+      "name": "Collect Deals & Build Association Reads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        380,
+        320
+      ],
+      "notes": "Fail closed at 10,000 results or truncated pagination."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "ac02861e-665e-4bed-a471-01355138a500",
+              "leftValue": "={{ $json.noop !== true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "894c4e86-95a1-40de-aae3-79c0f85fb81b",
+      "name": "Deal Contacts Needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        600,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "sendHeaders": true,
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.HUBSPOT_PRIVATE_APP_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 30000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 150
+            }
+          }
+        }
+      },
+      "id": "1356c9a5-783f-41a4-aaf5-0a1987679d43",
+      "name": "HubSpot: Read Deal Contacts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        820,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "notes": "v4 batch read deal -> contacts (read-only)."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Full text: DISCLAIMER.md · Licensed under the MIT License. License: MIT © 2026 dhRobin Systems · Provided as-is, see the disclaimer.\n// ============================================================================\n// Collect Deal Contacts\n// Maps every closed-lost deal to its associated contacts (v4 batch read).\n// ============================================================================\nconst first = $('Collect Deals & Build Association Reads').first().json;\nconst deals = first.deals;\nconst dealContacts = {};\nconst items = $input.all().map((i) => i.json);\nif (!(items.length === 1 && items[0].noop)) {\n  for (const r of items) {\n    if (!r || !Array.isArray(r.results)) throw new Error('Deal -> contact association read returned an unexpected response; nothing evaluated.');\n    for (const row of r.results) dealContacts[String(row.from.id)] = (row.to || []).map((t) => String(t.toObjectId));\n  }\n}\nreturn [{ json: { deals, dealContacts } }];\n"
+      },
+      "id": "588cc9d9-59b1-4770-a852-25150af3e4f9",
+      "name": "Collect Deal Contacts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "sendHeaders": true,
+        "method": "POST",
+        "url": "={{ $('Config & Safety Gate').first().json.config.hubspot.searches.contacts.url }}",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.HUBSPOT_PRIVATE_APP_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Config & Safety Gate').first().json.config.hubspot.searches.contacts.body) }}",
+        "options": {
+          "timeout": 30000,
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "body",
+                    "name": "after",
+                    "value": "={{ $response.body.paging && $response.body.paging.next ? $response.body.paging.next.after : undefined }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body.paging || !$response.body.paging.next || !$response.body.paging.next.after }}",
+              "limitPagesFetched": true,
+              "maxRequests": 50,
+              "requestInterval": 250
+            }
+          }
+        }
+      },
+      "id": "e7fe2a1d-a075-42d2-a196-8dad2df4f810",
+      "name": "HubSpot: Search Disqualified Contacts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1260,
+        320
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "notes": "Read-only: contacts whose hs_lead_status is in DISQUALIFIED_LEAD_STATUSES."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Full text: DISCLAIMER.md · Licensed under the MIT License. License: MIT © 2026 dhRobin Systems · Provided as-is, see the disclaimer.\n// ============================================================================\n// Collect Candidates & Build Contact Reads\n// Union of (a) contacts on closed-lost deals and (b) contacts whose lead\n// status is disqualified. Emits batch reads for contact properties and for\n// contact -> deal associations (open-deal check), 100 ids each, or a noop.\n// ============================================================================\nconst { config } = $('Config & Safety Gate').first().json;\nconst prev = $('Collect Deal Contacts').first().json;\nconst pages = $input.all().map((i) => i.json);\nconst dq = new Set();\nlet total = 0;\nfor (const [i, p] of pages.entries()) {\n  if (!p || !Array.isArray(p.results)) throw new Error(`Disqualified-contact search page ${i + 1} is malformed; nothing evaluated.`);\n  total = Math.max(total, Number(p.total) || 0);\n  for (const c of p.results) dq.add(String(c.id));\n}\nif (total >= config.hubspot.maxSearchResults) throw new Error(`HubSpot reports ${total} disqualified contacts (search API limit 10,000). Narrow DISQUALIFIED_LEAD_STATUSES; nothing evaluated.`);\nif (dq.size < total) throw new Error(`Disqualified-contact search returned ${dq.size} of ${total}; nothing evaluated.`);\nconst ids = new Set([...dq]);\nfor (const list of Object.values(prev.dealContacts)) for (const c of list) ids.add(c);\nconst all = [...ids].sort();\nconst H = config.hubspot;\nconst items = [];\nfor (let i = 0; i < all.length; i += 100) {\n  const chunk = all.slice(i, i + 100);\n  items.push({ json: { kind: 'contacts', url: `${H.base}/crm/v3/objects/contacts/batch/read`, body: { properties: H.contactProps, inputs: chunk.map((id) => ({ id })) } } });\n  items.push({ json: { kind: 'contactDeals', url: `${H.base}/crm/v4/associations/contacts/deals/batch/read`, body: { inputs: chunk.map((id) => ({ id })) } } });\n}\nreturn items.length ? items.map((i) => ({ json: { ...i.json, dqIds: [...dq] } })) : [{ json: { noop: true, dqIds: [] } }];\n"
+      },
+      "id": "6ee113d5-8f80-4b06-a35d-05e23aeac019",
+      "name": "Collect Candidates & Build Contact Reads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1480,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "22084498-8fbc-443e-a0b3-188a05cc9203",
+              "leftValue": "={{ $json.noop !== true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "7f7db497-7d7b-4a37-a23b-7a90e70169a1",
+      "name": "Candidates Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1700,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "sendHeaders": true,
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.HUBSPOT_PRIVATE_APP_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 30000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 150
+            }
+          }
+        }
+      },
+      "id": "902ef808-1131-436e-af94-a655596233f8",
+      "name": "HubSpot: Read Contacts & Deal Links",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1920,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "notes": "Batch read contact properties + contact -> deal links (read-only)."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Full text: DISCLAIMER.md · Licensed under the MIT License. License: MIT © 2026 dhRobin Systems · Provided as-is, see the disclaimer.\n// ============================================================================\n// Collect Contacts & Build Deal Reads\n// Stores contact properties and contact -> deal links, then emits batch reads\n// for associated deals that were not in the closed-lost search (open-deal\n// check needs hs_is_closed for every associated deal), or a noop.\n// ============================================================================\nconst { config } = $('Config & Safety Gate').first().json;\nconst reqs = $('Collect Candidates & Build Contact Reads').all().map((i) => i.json);\nconst res = $input.all().map((i) => i.json);\nconst known = $('Collect Deal Contacts').first().json.deals;\nif (reqs.length !== res.length) throw new Error(`Expected ${reqs.length} batch-read responses, got ${res.length}; nothing evaluated.`);\nconst contacts = {};\nconst contactDeals = {};\nreqs.forEach((q, i) => {\n  const r = res[i];\n  if (!r || !Array.isArray(r.results)) throw new Error(`Batch read (${q.kind}) returned an unexpected response; nothing evaluated.`);\n  if (q.kind === 'contacts') for (const c of r.results) contacts[String(c.id)] = c.properties || {};\n  else for (const row of r.results) contactDeals[String(row.from.id)] = (row.to || []).map((t) => String(t.toObjectId));\n});\nconst need = new Set();\nfor (const list of Object.values(contactDeals)) for (const d of list) if (!known[d]) need.add(d);\nconst ids = [...need].sort();\nconst items = [];\nfor (let i = 0; i < ids.length; i += 100) items.push({ json: { url: `${config.hubspot.base}/crm/v3/objects/deals/batch/read`, body: { properties: config.hubspot.dealProps, inputs: ids.slice(i, i + 100).map((id) => ({ id })) } } });\nreturn items.length ? items.map((i) => ({ json: { ...i.json, contacts, contactDeals } })) : [{ json: { noop: true, contacts, contactDeals } }];\n"
+      },
+      "id": "f7178c33-734d-4d5a-afa6-dc5583eb3f7f",
+      "name": "Collect Contacts & Build Deal Reads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2140,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "d0243bc1-ee9f-4eee-a2a9-9868ec981c34",
+              "leftValue": "={{ $json.noop !== true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "2ea65f08-23ca-4d16-af60-4eaa79111d0c",
+      "name": "Deal Reads Needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2360,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "sendHeaders": true,
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.HUBSPOT_PRIVATE_APP_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 30000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 150
+            }
+          }
+        }
+      },
+      "id": "ada46f81-fcdf-463e-a2cd-4176f4f4f5f5",
+      "name": "HubSpot: Batch Read Associated Deals",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2580,
+        80
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "notes": "Open-deal check: hs_is_closed for every associated deal (read-only)."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Full text: DISCLAIMER.md · Licensed under the MIT License. License: MIT © 2026 dhRobin Systems · Provided as-is, see the disclaimer.\n// ============================================================================\n// Assemble Candidates\n// One canonical candidate set for both the live discovery chain and the\n// sandbox fixture: deals, contacts, deal <-> contact links, disqualified ids.\n// ============================================================================\nconst first = $input.first().json;\nif (first.source === 'synthetic-fixture') return [{ json: first }];\nconst dl = $('Collect Deal Contacts').first().json;\nconst dqIds = $('Collect Candidates & Build Contact Reads').first().json.dqIds || [];\nlet contacts = {};\nlet contactDeals = {};\ntry { const c = $('Collect Contacts & Build Deal Reads').first().json; contacts = c.contacts; contactDeals = c.contactDeals; } catch (e) { /* no candidates */ }\nconst deals = { ...dl.deals };\nconst items = $input.all().map((i) => i.json);\nif (!(items.length === 1 && items[0].noop) && !items[0].contacts) {\n  for (const r of items) {\n    if (!r || !Array.isArray(r.results)) throw new Error('Associated-deal batch read returned an unexpected response; nothing evaluated.');\n    for (const d of r.results) deals[String(d.id)] = d.properties || {};\n  }\n}\nreturn [{ json: { source: 'hubspot', closedLostDealIds: Object.keys(dl.deals), deals, dealContacts: dl.dealContacts, dqIds, contacts, contactDeals, sandbox: null } }];\n"
+      },
+      "id": "48ff60f8-6bfd-4c23-a9c0-f49b09fa1545",
+      "name": "Assemble Candidates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2800,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Full text: DISCLAIMER.md · Licensed under the MIT License. License: MIT © 2026 dhRobin Systems · Provided as-is, see the disclaimer.\n// ============================================================================\n// Evaluate Cooling-Off & Suppression\n// Cooling-off clock = the LATEST of: closed-lost close date, disqualified\n// date, last contacted, last sales activity, last sales-email reply and last\n// recycle. Any newer touch restarts the clock. A contact is eligible only\n// when COOLING_OFF_DAYS have passed since that moment.\n// Hard suppressions run first (never re-routed): no email, unsubscribed,\n// hard bounce / invalid / quarantined address, DO_NOT_RECYCLE, excluded\n// lifecycle stage, open deal, excluded lost reason, recycle cap.\n// ============================================================================\nconst { config } = $('Config & Safety Gate').first().json;\nconst A = $input.first().json;\nconst DAY = 86400000;\nconst R = config.rules;\nconst rx = (p) => (p ? new RegExp(p, 'i') : null);\nconst EXCL_LOST = rx(R.excludeLostReasons);\nconst ms = (v) => { if (v === null || v === undefined || v === '') return null; const s = String(v); const t = /^\\d{12,14}$/.test(s) ? Number(s) : Date.parse(/^\\d{4}-\\d{2}-\\d{2}$/.test(s) ? s + 'T00:00:00Z' : s); return Number.isFinite(t) && t > Date.UTC(1990, 0, 1) && t < config.nowMs + DAY ? t : null; };\nconst truthy = (v) => v === true || String(v).toLowerCase() === 'true';\nconst closedLost = new Set(A.closedLostDealIds);\n// Only transient holds bypass the re-evaluation interval (no daily credit burn\n// on, for example, risky emails that will not change overnight).\nconst RETRYABLE = ['ENRICHMENT_FAILED', 'ENROLLMENT_FAILED', 'ENROLLMENT_CHECK_FAILED', 'ENRICHMENT_CAP', 'OUTBOUND_RUN_CAP', 'OUTBOUND_OWNER_CAP', 'NURTURE_RUN_CAP'];\n\nconst candidates = Object.entries(A.contacts).filter(([, p]) => p).map(([id, p]) => {\n  const linked = new Set(A.contactDeals[id] || []);\n  for (const [d, list] of Object.entries(A.dealContacts)) if (list.includes(id)) linked.add(d);\n  const lostDeals = [...linked].filter((d) => closedLost.has(d) || (A.deals[d] && config.population.closedLostStages.includes(A.deals[d].dealstage)));\n  const openDeals = [...linked].filter((d) => A.deals[d] && !truthy(A.deals[d].hs_is_closed) && !config.population.closedLostStages.includes(A.deals[d].dealstage));\n  const isDq = config.population.dqStatuses.includes(p.hs_lead_status);\n  const sources = [...(lostDeals.length ? ['CLOSED_LOST'] : []), ...(isDq ? ['DISQUALIFIED'] : [])];\n  const latestLost = lostDeals.map((d) => ms(A.deals[d].closedate)).filter(Boolean).sort((a, b) => b - a)[0] || null;\n  const lostReasons = lostDeals.map((d) => String(A.deals[d].closed_lost_reason || '')).filter(Boolean);\n  const touches = {\n    closedLost: latestLost,\n    disqualified: isDq ? ms(p[config.population.dqDateProp]) : null,\n    lastContacted: ms(p.notes_last_contacted),\n    lastSalesActivity: ms(p.hs_last_sales_activity_timestamp),\n    lastReply: ms(p.hs_sales_email_last_replied),\n    lastRecycled: ms(p.recycle_last_routed_at),\n  };\n  const start = Math.max(...Object.values(touches).filter(Boolean), 0) || null;\n  const clockFrom = start ? Object.entries(touches).find(([, v]) => v === start)[0] : null;\n  const eligibleOnMs = start ? start + config.cooling.days * DAY : null;\n  const c = {\n    id, ownerId: p.hubspot_owner_id ? String(p.hubspot_owner_id) : null, sources, lostDeals, openDeals, lostReasons,\n    email: p.email ? String(p.email).trim().toLowerCase() : '', firstname: p.firstname || '', lastname: p.lastname || '', company: p.company || '', jobtitle: p.jobtitle || '',\n    existing: { status: p.recycle_status || '', route: p.recycle_route || '', reason: p.recycle_reason || '', eligibleOn: p.recycle_eligible_on || '', emailStatus: p.recycle_email_status || '', count: Number(p.recycle_count) || 0, lastEvaluated: ms(p.recycle_last_evaluated_at), leadStatus: p.hs_lead_status || '' },\n    clockStart: start ? new Date(start).toISOString() : null, clockFrom,\n    daysSinceTouch: start ? Math.floor((config.nowMs - start) / DAY) : null,\n    eligibleOn: eligibleOnMs ? new Date(eligibleOnMs).toISOString().slice(0, 10) : null,\n    eligibleOnMs,\n    stage: null, decision: null, reason: null, flags: [],\n  };\n  const set = (decision, reason) => { c.decision = decision; c.reason = reason; return c; };\n  if (!sources.length) return set('SKIP', 'NOT_IN_POPULATION');\n  if (!c.email) return set('SUPPRESS', 'NO_EMAIL');\n  if (truthy(p.hs_email_optout)) return set('SUPPRESS', 'UNSUBSCRIBED');\n  if (p.hs_email_hard_bounce_reason_enum || truthy(p.hs_email_bad_address) || truthy(p.hs_email_quarantined)) return set('SUPPRESS', 'EMAIL_INVALID_HUBSPOT');\n  if (c.existing.status === 'DO_NOT_RECYCLE') return set('SUPPRESS', 'DO_NOT_RECYCLE');\n  if (R.excludeLifecycle.includes(String(p.lifecyclestage || '').toLowerCase())) return set('SUPPRESS', 'LIFECYCLE_EXCLUDED');\n  if (openDeals.length) return set('SUPPRESS', 'OPEN_DEAL');\n  if (EXCL_LOST && lostReasons.some((r) => EXCL_LOST.test(r))) return set('SUPPRESS', 'LOST_REASON_EXCLUDED');\n  if (c.existing.count >= config.cooling.maxRecycles) return set('SUPPRESS', 'MAX_RECYCLES_REACHED');\n  if (!start) return set('HOLD', 'NO_REFERENCE_DATE');\n  if (config.nowMs < eligibleOnMs) return set('COOLING', 'COOLING_OFF');\n  const recently = c.existing.lastEvaluated && config.nowMs - c.existing.lastEvaluated < config.cooling.reevaluateDays * DAY;\n  if (recently && !(['HOLD', 'DEFERRED'].includes(c.existing.status) && RETRYABLE.includes(c.existing.reason))) return set('SKIP', 'RECENTLY_EVALUATED');\n  return set('VERIFY', 'COOLED_OFF');\n});\n\n// Enrichment budget: longest-cooled first\nconst toVerify = candidates.filter((c) => c.decision === 'VERIFY').sort((a, b) => a.eligibleOnMs - b.eligibleOnMs || (a.id < b.id ? -1 : 1));\ntoVerify.slice(config.caps.enrichmentPerRun).forEach((c) => { c.decision = 'DEFERRED'; c.reason = 'ENRICHMENT_CAP'; });\nreturn [{ json: { source: A.source, candidates, sandbox: A.sandbox, populationCounts: { closedLostDeals: A.closedLostDealIds.length, disqualifiedContacts: A.dqIds.length, candidates: candidates.length } } }];\n"
+      },
+      "id": "b160bf9e-655e-404a-ae87-ddbabbc6fd07",
+      "name": "Evaluate Cooling-Off & Suppression",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3020,
+        100
+      ],
+      "notes": "Latest-touch cooling-off clock, hard suppressions, enrichment budget."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Full text: DISCLAIMER.md · Licensed under the MIT License. License: MIT © 2026 dhRobin Systems · Provided as-is, see the disclaimer.\n// ============================================================================\n// Build Enrichment Requests\n// One re-verification request per cooled-off contact (email validity + current\n// job title / employer) through a provider-agnostic HTTP adapter:\n//   POST ENRICHMENT_API_URL  { email, firstName, lastName, company, jobTitle }\n// The API key is added by the HTTP node from $env. In SANDBOX_MODE responses\n// come from the fixture. When enrichment is off, no request is built and the\n// router relies on HubSpot bounce / opt-out signals only (UNVERIFIED).\n// ============================================================================\nconst { config } = $('Config & Safety Gate').first().json;\nconst b = $input.first().json;\nconst E = config.enrichment;\nconst mode = config.sandboxMode ? 'simulate' : E.allowed ? 'live' : null;\nconst items = [];\nif (mode) {\n  for (const c of b.candidates.filter((x) => x.decision === 'VERIFY')) {\n    const body = { email: c.email, company: c.company || null, jobTitle: c.jobtitle || null };\n    if (E.sendName) { body.firstName = c.firstname || null; body.lastName = c.lastname || null; }\n    items.push({ json: { mode, contactId: c.id, url: mode === 'live' ? E.url : null, body } });\n  }\n}\nreturn items.length ? items : [{ json: { noop: true, reason: mode ? 'nothing to verify' : 'enrichment off: ' + E.blockers.join('; ') } }];\n"
+      },
+      "id": "ff277d20-8406-4f61-a189-f5e3e3605248",
+      "name": "Build Enrichment Requests",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3240,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "29fc312d-4f5e-41d5-afef-cf1d749e175a",
+              "leftValue": "={{ $json.noop !== true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "5a94c0cf-bfe6-45ef-aae0-947e2a4bf11c",
+      "name": "Enrichment Needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3460,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "6f0a6743-b7c0-473f-a62f-d3a8d4eb8147",
+              "leftValue": "={{ $json.mode === 'simulate' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "6b10cf6e-d5eb-4ce9-a036-a6dcd1e3835a",
+      "name": "Sandbox Enrichment?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3680,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Full text: DISCLAIMER.md · Licensed under the MIT License. License: MIT © 2026 dhRobin Systems · Provided as-is, see the disclaimer.\n// ============================================================================\n// Simulated Enrichment  (SANDBOX_MODE only; zero network calls)\n// Answers from the fixture's synthetic enrichment responses (keyed by email).\n// ============================================================================\nconst fx = $('Load Synthetic Recycle Fixture').first().json.sandbox.enrichment || {};\nreturn $input.all().map((i) => {\n  const r = fx[i.json.body.email];\n  if (!r) return { json: { email_status: 'unknown' } };\n  if (r.__error) return { json: { error: { message: r.__error } } };\n  return { json: r };\n});\n"
+      },
+      "id": "df6c9b50-0432-4a20-af16-6ab89133b290",
+      "name": "Simulated Enrichment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3900,
+        -180
+      ],
+      "notes": "SANDBOX only: fixture enrichment responses."
+    },
+    {
+      "parameters": {
+        "sendHeaders": true,
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "={{ $('Config & Safety Gate').first().json.config.enrichment.authHeader }}",
+              "value": "={{ $('Config & Safety Gate').first().json.config.enrichment.authPrefix + $env.ENRICHMENT_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": "={{ $('Config & Safety Gate').first().json.config.enrichment.timeoutMs }}",
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 200
+            }
+          }
+        }
+      },
+      "id": "85baa07d-87f8-4ef5-ade6-370948b4d0c8",
+      "name": "Enrichment API: Verify Contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3900,
+        40
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "notes": "Provider-agnostic email + job-title re-verification. Key from $env only. Failures -> HOLD (retried next run)."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Full text: DISCLAIMER.md · Licensed under the MIT License. License: MIT © 2026 dhRobin Systems · Provided as-is, see the disclaimer.\n// ============================================================================\n// Route Re-Entry\n// Applies re-verification results, then routes each cooled-off contact:\n//   OUTBOUND  verified email + senior title (OUTBOUND_TITLE_REGEX) + lost reason\n//             not nurture-only + a sequence for the source + a sender\n//   NURTURE   target persona (TARGET_TITLE_REGEX) with a valid / HubSpot-clean\n//             email (risky only if NURTURE_ALLOW_RISKY=true)\n//   SUPPRESS  invalid email, left the company, excluded or off-persona title\n//   HOLD      enrichment failed or email risky -> retried on the next run\n// Per-run and per-owner caps defer the overflow (longest-cooled first).\n// Builds the contact-property stamps (only when something changed) and the\n// routing report.\n// ============================================================================\nconst { config } = $('Config & Safety Gate').first().json;\nconst ev = $('Evaluate Cooling-Off & Suppression').first().json;\nconst R = config.rules;\nconst rx = (p) => (p ? new RegExp(p, 'i') : null);\nconst OUT_T = rx(R.outboundTitle), TGT_T = rx(R.targetTitle), EXC_T = rx(R.excludeTitle), NURT_LOST = rx(R.nurtureOnlyLostReasons);\n// In SANDBOX_MODE only, the fixture's example sequences / senders / list stand in\n// for SEQUENCE_MAP_JSON / OWNER_SENDER_MAP_JSON / DEFAULT_SENDER_* when unset.\nconst SR = config.sandboxMode && ev.sandbox ? ev.sandbox.routing : null;\nconst ROUTING = {\n  sequenceMap: Object.keys(config.routing.sequenceMap).length || !SR ? config.routing.sequenceMap : SR.sequenceMap,\n  ownerSenders: Object.keys(config.routing.ownerSenders).length || !SR ? config.routing.ownerSenders : SR.ownerSenders,\n  defaultSender: config.routing.defaultSender || (SR ? SR.defaultSender : null),\n};\nconst getPath = (o, p) => p.replace(/\\[(\\d+)\\]/g, '.$1').split('.').reduce((a, k) => (a === null || a === undefined ? undefined : a[k]), o);\n\n// ---- merge enrichment results ------------------------------------------------------\nconst enrichment = {};\nlet reqs = [];\ntry { reqs = $('Build Enrichment Requests').all().map((i) => i.json).filter((q) => !q.noop); } catch (e) { reqs = []; }\nconst res = $input.all().map((i) => i.json);\nconst enrichedThisRun = reqs.length > 0 && !(res.length === 1 && res[0].noop);\nif (enrichedThisRun) {\n  if (res.length !== reqs.length) throw new Error(`Enrichment returned ${res.length} responses for ${reqs.length} requests; nothing routed.`);\n  reqs.forEach((q, i) => {\n    const r = res[i] || {};\n    if (r.error) { enrichment[q.contactId] = { failed: true, message: String(r.error.message || r.error).slice(0, 160) }; return; }\n    const M = config.enrichment.responseMap;\n    const rawStatus = getPath(r, M.emailStatus);\n    const status = rawStatus === undefined || rawStatus === null ? 'UNKNOWN' : config.enrichment.statusMap[String(rawStatus).toLowerCase()] || 'UNKNOWN';\n    const sac = getPath(r, M.stillAtCompany);\n    enrichment[q.contactId] = { failed: false, emailStatus: status, jobTitle: getPath(r, M.jobTitle) ? String(getPath(r, M.jobTitle)).trim().slice(0, 200) : null, company: getPath(r, M.company) ? String(getPath(r, M.company)).trim().slice(0, 200) : null, stillAtCompany: sac === true || String(sac).toLowerCase() === 'true' ? true : sac === false || String(sac).toLowerCase() === 'false' ? false : null };\n  });\n}\n\n// ---- route ---------------------------------------------------------------------------\nconst senderFor = (ownerId) => (ownerId && ROUTING.ownerSenders[ownerId]) || ROUTING.defaultSender;\nconst decisions = ev.candidates.map((c0) => {\n  const c = JSON.parse(JSON.stringify(c0));\n  c.emailStatus = c.existing.emailStatus && c.decision !== 'VERIFY' ? c.existing.emailStatus : null;\n  if (c.decision !== 'VERIFY') return c;\n  c.evaluatedNow = true;\n  const e = enrichment[c.id];\n  if (!e) { c.emailStatus = 'UNVERIFIED'; c.flags.push(config.enrichment.mode === 'http' ? 'ENRICHMENT_SKIPPED' : 'HUBSPOT_SIGNALS_ONLY'); }\n  else if (e.failed) { c.decision = 'HOLD'; c.reason = 'ENRICHMENT_FAILED'; c.flags.push('ENRICHMENT_ERROR'); c.enrichmentError = e.message; c.verified = true; return c; }\n  else {\n    c.verified = true;\n    c.emailStatus = e.emailStatus;\n    if (e.jobTitle && e.jobTitle.toLowerCase() !== String(c.jobtitle).toLowerCase()) { c.flags.push('JOB_TITLE_CHANGED'); c.newJobTitle = e.jobTitle; }\n    if (e.company && c.company && e.company.toLowerCase() !== c.company.toLowerCase()) c.flags.push('COMPANY_CHANGED');\n    if (e.stillAtCompany === false) { c.decision = 'SUPPRESS'; c.reason = 'LEFT_COMPANY'; c.flags.push('JOB_CHANGER'); return c; }\n  }\n  if (c.emailStatus === 'INVALID') { c.decision = 'SUPPRESS'; c.reason = 'EMAIL_INVALID_VERIFIED'; return c; }\n  const title = c.newJobTitle || c.jobtitle || '';\n  if (EXC_T && EXC_T.test(title)) { c.decision = 'SUPPRESS'; c.reason = 'TITLE_EXCLUDED'; return c; }\n  const outboundEmailOk = c.emailStatus === 'VALID' || (!R.requireVerifiedForOutbound && c.emailStatus === 'UNVERIFIED');\n  const nurtureEmailOk = ['VALID', 'UNVERIFIED'].includes(c.emailStatus) || (R.nurtureAllowRisky && ['RISKY', 'UNKNOWN'].includes(c.emailStatus));\n  const seqKey = c.sources.includes('CLOSED_LOST') ? 'CLOSED_LOST' : 'DISQUALIFIED';\n  const seniorTitle = OUT_T ? OUT_T.test(title) : false;\n  const persona = !TGT_T || TGT_T.test(title) || seniorTitle;\n  const nurtureOnly = NURT_LOST && c.lostReasons.some((r) => NURT_LOST.test(r));\n  if (seniorTitle && outboundEmailOk && !nurtureOnly) {\n    const seq = ROUTING.sequenceMap[seqKey];\n    const sender = senderFor(c.ownerId);\n    if (seq && sender) { c.decision = 'OUTBOUND'; c.reason = `SEQUENCE_${seqKey}`; c.sequenceId = seq; c.sender = sender; return c; }\n    c.flags.push(seq ? 'NO_SENDER_FOR_OWNER' : 'OUTBOUND_UNAVAILABLE');\n  } else if (seniorTitle && nurtureOnly) c.flags.push('NURTURE_ONLY_LOST_REASON');\n  else if (seniorTitle && !outboundEmailOk) c.flags.push('EMAIL_NOT_VERIFIED_FOR_OUTBOUND');\n  if (!persona) { c.decision = 'SUPPRESS'; c.reason = 'OFF_PERSONA'; return c; }\n  if (!nurtureEmailOk) { c.decision = 'HOLD'; c.reason = 'EMAIL_RISKY'; return c; }\n  c.decision = 'NURTURE'; c.reason = `NURTURE_${seqKey}`;\n  return c;\n});\n\n// ---- caps (longest-cooled first) ---------------------------------------------------------\nconst byAge = (a, b) => (a.eligibleOnMs || 0) - (b.eligibleOnMs || 0) || (a.id < b.id ? -1 : 1);\nconst perOwner = {};\nlet outbound = 0;\nfor (const c of decisions.filter((d) => d.decision === 'OUTBOUND').sort(byAge)) {\n  const k = c.ownerId || 'unowned';\n  if (outbound >= config.caps.outboundPerRun || (perOwner[k] || 0) >= config.caps.outboundPerOwner) { c.decision = 'DEFERRED'; c.reason = outbound >= config.caps.outboundPerRun ? 'OUTBOUND_RUN_CAP' : 'OUTBOUND_OWNER_CAP'; continue; }\n  outbound++; perOwner[k] = (perOwner[k] || 0) + 1;\n}\nlet nurture = 0;\nfor (const c of decisions.filter((d) => d.decision === 'NURTURE').sort(byAge)) {\n  if (nurture >= config.caps.nurturePerRun) { c.decision = 'DEFERRED'; c.reason = 'NURTURE_RUN_CAP'; continue; }\n  nurture++;\n}\n\n// ---- report ----------------------------------------------------------------------------------\nconst count = (k) => decisions.reduce((m, d) => { m[d[k]] = (m[d[k]] || 0) + 1; return m; }, {});\nconst report = {\n  runId: config.runId,\n  generatedAt: config.now,\n  mode: config.sandboxMode ? 'SANDBOX' : config.dryRun ? 'DRY_RUN' : 'LIVE',\n  source: ev.source,\n  coolingOffDays: config.cooling.days,\n  lastTouchCutoff: config.cooling.cutoffIso,\n  population: ev.populationCounts,\n  decisions: count('decision'),\n  reasons: count('reason'),\n  enrichment: { mode: config.sandboxMode ? 'simulated' : config.enrichment.allowed ? config.enrichment.mode : 'off', requested: reqs.length, failed: Object.values(enrichment).filter((e) => e.failed).length },\n  outboundByOwner: perOwner,\n  outbound: decisions.filter((d) => d.decision === 'OUTBOUND').map((d) => ({ contactId: d.id, ownerId: d.ownerId, sequenceId: d.sequenceId, source: d.reason, emailStatus: d.emailStatus })),\n  nurture: decisions.filter((d) => d.decision === 'NURTURE').map((d) => ({ contactId: d.id, source: d.reason, emailStatus: d.emailStatus, flags: d.flags })),\n  cooling: decisions.filter((d) => d.decision === 'COOLING').map((d) => ({ contactId: d.id, eligibleOn: d.eligibleOn, clockFrom: d.clockFrom, daysSinceTouch: d.daysSinceTouch })),\n  suppressed: decisions.filter((d) => d.decision === 'SUPPRESS').map((d) => ({ contactId: d.id, reason: d.reason })),\n  held: decisions.filter((d) => ['HOLD', 'DEFERRED'].includes(d.decision)).map((d) => ({ contactId: d.id, decision: d.decision, reason: d.reason })),\n  jobChangers: decisions.filter((d) => d.flags.includes('JOB_CHANGER') || d.flags.includes('JOB_TITLE_CHANGED')).map((d) => ({ contactId: d.id, flags: d.flags })),\n  warnings: config.warnings,\n  configErrors: config.configErrors,\n};\nconst routed = decisions.filter((d) => ['OUTBOUND', 'NURTURE'].includes(d.decision)).length;\nconst writeBlockers = [...config.writes.hubspot.blockers];\nif (!decisions.some((d) => d.decision !== 'SKIP')) writeBlockers.push('Nothing to evaluate');\nreturn [{ json: { report, decisions, routed, writeAllowed: writeBlockers.length === 0, writeBlockers } }];\n"
+      },
+      "id": "08241519-67a2-435e-a2bc-f3db1e854d9e",
+      "name": "Route Re-Entry",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4120,
+        100
+      ],
+      "notes": "OUTBOUND / NURTURE / SUPPRESS / HOLD, caps, routing report."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "084d95d1-69b2-4601-a1d8-8cb1bb330962",
+              "leftValue": "={{ $json.writeAllowed }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "7b383aac-0296-4beb-a335-c69ce17f0e49",
+      "name": "Writes Allowed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4340,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Full text: DISCLAIMER.md · Licensed under the MIT License. License: MIT © 2026 dhRobin Systems · Provided as-is, see the disclaimer.\n// ============================================================================\n// Dry-Run Routing Report\n// Nothing was written, enrolled or added to a list. The report shows every\n// contact's decision, cooling-off dates, suppressions and planned routes.\n// ============================================================================\nconst P = $input.first().json;\nreturn [{ json: { mode: 'dry-run', writeBlockedBy: P.writeBlockers, report: P.report } }];\n"
+      },
+      "id": "e03bc423-9810-4aa8-a75e-942dbeb4df1a",
+      "name": "Dry-Run Routing Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4560,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Full text: DISCLAIMER.md · Licensed under the MIT License. License: MIT © 2026 dhRobin Systems · Provided as-is, see the disclaimer.\n// ============================================================================\n// Build Enrollment Checks\n// Before any sequence enrollment, read the contact's current enrollment\n// (GET /automation/v4/sequences/enrollments/contact/{id}) so nobody is\n// enrolled twice or pulled out of a sequence a rep started manually.\n// ============================================================================\nconst { config } = $('Config & Safety Gate').first().json;\nconst P = $input.first().json;\nconst out = P.decisions.filter((d) => d.decision === 'OUTBOUND');\nif (!config.writes.sequence.allowed || !out.length) return [{ json: { noop: true } }];\nreturn out.map((d) => ({ json: { contactId: d.id, url: `${config.hubspot.base}/automation/v4/sequences/enrollments/contact/${d.id}` } }));\n"
+      },
+      "id": "caa33b20-c86e-4bf2-a5ad-48f5e0f12bbc",
+      "name": "Build Enrollment Checks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4560,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "a25894dc-9642-4b22-a0fb-662867f18e6d",
+              "leftValue": "={{ $json.noop !== true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "57b231dc-a670-42f9-a930-9510d72ad217",
+      "name": "Enrollment Checks Needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4780,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "sendHeaders": true,
+        "method": "GET",
+        "url": "={{ $json.url }}",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.HUBSPOT_PRIVATE_APP_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 150
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "9d066829-1230-4473-a5cd-bffe02075109",
+      "name": "HubSpot: Check Active Enrollment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5000,
+        -200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "notes": "Read-only: skip contacts already enrolled in a sequence."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Full text: DISCLAIMER.md · Licensed under the MIT License. License: MIT © 2026 dhRobin Systems · Provided as-is, see the disclaimer.\n// ============================================================================\n// Build Sequence Enrollments\n// 404 / no active enrollment -> enroll. An active enrollment -> skip\n// (IN_ACTIVE_SEQUENCE). Any other check result -> HOLD (fail closed, retried\n// next run). Enrollment body: { contactId, sequenceId, senderEmail } with\n// ?userId=<sender user id>; senders come from OWNER_SENDER_MAP_JSON or the\n// default sender.\n// ============================================================================\nconst { config } = $('Config & Safety Gate').first().json;\nconst P = $('Route Re-Entry').first().json;\nconst checks = {};\nlet reqs = [];\ntry { reqs = $('Build Enrollment Checks').all().map((i) => i.json).filter((q) => !q.noop); } catch (e) { reqs = []; }\nconst res = $input.all().map((i) => i.json);\nreqs.forEach((q, i) => {\n  const r = res[i] || {};\n  const status = Number(r.statusCode);\n  const body = r.body && typeof r.body === 'object' ? r.body : {};\n  if (r.error && r.statusCode === undefined) checks[q.contactId] = { state: 'CHECK_FAILED', message: String(r.error.message || r.error).slice(0, 160) };\n  else if (status === 404) checks[q.contactId] = { state: 'NONE' };\n  else if (status >= 200 && status < 300) checks[q.contactId] = body.sequenceId || body.id || body.enrolledAt ? { state: 'ACTIVE', sequenceId: body.sequenceId ? String(body.sequenceId) : null } : { state: 'NONE' };\n  else checks[q.contactId] = { state: 'CHECK_FAILED', message: `HTTP ${status}` };\n});\nconst items = [];\nfor (const d of P.decisions.filter((x) => x.decision === 'OUTBOUND')) {\n  const c = checks[d.id];\n  if (!c || c.state !== 'NONE') continue;\n  items.push({ json: { contactId: d.id, url: `${config.hubspot.base}/automation/v4/sequences/enrollments?userId=${encodeURIComponent(d.sender.userId)}`, body: { contactId: d.id, sequenceId: d.sequenceId, senderEmail: d.sender.senderEmail } } });\n}\nreturn items.length ? items.map((i) => ({ json: { ...i.json, checks } })) : [{ json: { noop: true, checks } }];\n"
+      },
+      "id": "d98626f8-9069-4e94-a8b5-7b560de54100",
+      "name": "Build Sequence Enrollments",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5220,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c8b886e7-7f95-4704-a8f3-5566fda23198",
+              "leftValue": "={{ $json.noop !== true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "471c6ceb-1b77-4ac5-ae22-ffbd0207e268",
+      "name": "Enrollments Needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        5440,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "sendHeaders": true,
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.HUBSPOT_PRIVATE_APP_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 30000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 150
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "f147c07f-8ab1-430d-ad6e-b925c9d32b07",
+      "name": "HubSpot: Enroll in Sequence",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5660,
+        -200
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "Sequence enrollment. NO automatic retry (an enrollment sends email); failures -> HOLD, retried next run after the active-enrollment check."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Full text: DISCLAIMER.md · Licensed under the MIT License. License: MIT © 2026 dhRobin Systems · Provided as-is, see the disclaimer.\n// ============================================================================\n// Build Contact Updates\n// Final status per contact and the recycle_* property stamps:\n//   RECYCLED_OUTBOUND / RECYCLED_NURTURE (routed: recycle_count + 1,\n//   recycle_last_routed_at, recycle_route), ELIGIBLE_* (routing gate off),\n//   IN_ACTIVE_SEQUENCE, COOLING (+ recycle_eligible_on), SUPPRESSED, HOLD,\n//   DEFERRED. A contact is only written when something changed, so daily\n//   runs do not churn records. Nurture-routed contacts are also added to\n//   NURTURE_LIST_ID (a static list) when configured.\n// ============================================================================\nconst { config } = $('Config & Safety Gate').first().json;\nconst P = $('Route Re-Entry').first().json;\nconst EB = $('Build Sequence Enrollments').first().json;\nconst checks = EB.checks || {};\nlet enrollReqs = [];\ntry { enrollReqs = $('Build Sequence Enrollments').all().map((i) => i.json).filter((q) => !q.noop); } catch (e) { enrollReqs = []; }\nlet enrollRes = [];\ntry { enrollRes = $('HubSpot: Enroll in Sequence').all().map((i) => i.json); } catch (e) { enrollRes = []; }\nconst enrolled = {};\nenrollReqs.forEach((q, i) => {\n  const r = enrollRes[i] || {};\n  const s = Number(r.statusCode);\n  enrolled[q.contactId] = s >= 200 && s < 300 ? { ok: true } : { ok: false, message: r.error ? String(r.error.message || r.error).slice(0, 160) : `HTTP ${s}: ${JSON.stringify(r.body || {}).slice(0, 120)}` };\n});\nconst seqOn = config.writes.sequence.allowed;\nconst nurOn = config.writes.nurture.allowed;\nconst now = config.now;\nconst outcomes = [];\nconst updates = [];\nconst listAdds = [];\nfor (const d of P.decisions) {\n  if (d.decision === 'SKIP') continue;\n  let status, reason = d.reason, route = '', routed = false;\n  if (d.decision === 'OUTBOUND') {\n    if (!seqOn) status = 'ELIGIBLE_OUTBOUND';\n    else {\n      const c = checks[d.id];\n      if (c && c.state === 'ACTIVE') { status = 'IN_ACTIVE_SEQUENCE'; reason = 'ALREADY_ENROLLED'; }\n      else if (!c || c.state === 'CHECK_FAILED') { status = 'HOLD'; reason = 'ENROLLMENT_CHECK_FAILED'; }\n      else if (enrolled[d.id] && enrolled[d.id].ok) { status = 'RECYCLED_OUTBOUND'; route = 'SEQUENCE'; routed = true; }\n      else { status = 'HOLD'; reason = 'ENROLLMENT_FAILED'; }\n    }\n  } else if (d.decision === 'NURTURE') {\n    if (nurOn) { status = 'RECYCLED_NURTURE'; route = 'NURTURE'; routed = true; } else status = 'ELIGIBLE_NURTURE';\n  } else status = { SUPPRESS: 'SUPPRESSED', COOLING: 'COOLING', HOLD: 'HOLD', DEFERRED: 'DEFERRED' }[d.decision];\n  // A contact routed earlier keeps its RECYCLED_* status while its new cooling-off\n  // period runs (recycle_route / count / routed_at already tell the story).\n  // DO_NOT_RECYCLE is set by people and is never overwritten by the router.\n  if (d.existing.status === 'DO_NOT_RECYCLE') { outcomes.push({ contactId: d.id, decision: d.decision, status: 'DO_NOT_RECYCLE', reason: d.reason, route: '', routed: false, written: false }); continue; }\n  if (d.decision === 'COOLING' && d.clockFrom === 'lastRecycled' && /^RECYCLED_/.test(d.existing.status)) { outcomes.push({ contactId: d.id, decision: d.decision, status: d.existing.status, reason: d.existing.reason, route: '', routed: false, written: false }); continue; }\n  const props = { recycle_status: status, recycle_reason: reason };\n  if (d.decision === 'COOLING' && d.eligibleOn) props.recycle_eligible_on = d.eligibleOn;\n  if (d.evaluatedNow) { props.recycle_last_evaluated_at = now; if (d.emailStatus) props.recycle_email_status = d.emailStatus; }\n  if (routed) {\n    props.recycle_route = route;\n    props.recycle_last_routed_at = now;\n    props.recycle_count = String(d.existing.count + 1);\n    if (config.rules.setLeadStatusOnRoute && d.existing.leadStatus !== config.rules.setLeadStatusOnRoute) props.hs_lead_status = config.rules.setLeadStatusOnRoute;\n  }\n  if (config.rules.updateJobTitle && d.newJobTitle) props.jobtitle = d.newJobTitle;\n  const changed = routed || props.recycle_last_evaluated_at || props.jobtitle || status !== d.existing.status || reason !== d.existing.reason || (props.recycle_eligible_on && props.recycle_eligible_on !== d.existing.eligibleOn);\n  outcomes.push({ contactId: d.id, decision: d.decision, status, reason, route, routed, written: !!changed && config.writes.hubspot.allowed, enrollError: enrolled[d.id] && !enrolled[d.id].ok ? enrolled[d.id].message : undefined });\n  if (changed) updates.push({ id: d.id, properties: props });\n  if (routed && route === 'NURTURE' && config.routing.nurtureListId) listAdds.push(d.id);\n}\nconst H = config.hubspot;\nconst items = [];\nif (config.writes.hubspot.allowed) {\n  for (let i = 0; i < updates.length; i += 100) items.push({ json: { kind: 'update', method: 'POST', url: `${H.base}/crm/v3/objects/contacts/batch/update`, body: { inputs: updates.slice(i, i + 100) }, ids: updates.slice(i, i + 100).map((u) => u.id) } });\n  for (let i = 0; i < listAdds.length; i += 100) items.push({ json: { kind: 'listAdd', method: 'PUT', url: `${H.base}/crm/v3/lists/${config.routing.nurtureListId}/memberships/add`, body: listAdds.slice(i, i + 100), ids: listAdds.slice(i, i + 100) } });\n}\nreturn items.length ? items.map((i) => ({ json: { ...i.json, outcomes } })) : [{ json: { noop: true, outcomes } }];\n"
+      },
+      "id": "84204e58-5b29-4f1d-a7fe-0a934eae3548",
+      "name": "Build Contact Updates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5880,
+        -60
+      ],
+      "notes": "Final statuses + recycle_* stamps (only changed records) + nurture list adds."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "28634370-614b-4f99-a3a3-8c0bccd40783",
+              "leftValue": "={{ $json.noop !== true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "82a972fa-b78e-4864-a892-66154e9b8dc9",
+      "name": "Updates Needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        6100,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "sendHeaders": true,
+        "method": "={{ $json.method }}",
+        "url": "={{ $json.url }}",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.HUBSPOT_PRIVATE_APP_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 30000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 150
+            }
+          }
+        }
+      },
+      "id": "58d3c6ef-2e29-48f2-a15e-2c7ff218cbe9",
+      "name": "HubSpot: Update Contacts & Nurture List",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6320,
+        -200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "notes": "Contact batch update (recycle_* stamps) and static-list membership add. Idempotent: retries are safe."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Full text: DISCLAIMER.md · Licensed under the MIT License. License: MIT © 2026 dhRobin Systems · Provided as-is, see the disclaimer.\n// ============================================================================\n// Recycle Run Report\n// One summary item per execution: decisions, routes actually taken, write\n// results and gates. Contacts are referenced by HubSpot record id only.\n// ============================================================================\nconst { config, safetyDecisions } = $('Config & Safety Gate').first().json;\nconst P = $('Route Re-Entry').first().json;\nconst last = $input.first().json;\nlet outcomes = null, writeResults = null;\nif (last.mode !== 'dry-run') {\n  const U = $('Build Contact Updates').all().map((i) => i.json);\n  outcomes = U[0].outcomes;\n  const reqs = U.filter((u) => !u.noop);\n  let res = [];\n  try { res = $('HubSpot: Update Contacts & Nurture List').all().map((i) => i.json); } catch (e) { res = []; }\n  writeResults = reqs.map((q, i) => ({ kind: q.kind, records: q.ids.length, ok: !!res[i] && !res[i].error, error: res[i] && res[i].error ? String(res[i].error.message || res[i].error).slice(0, 200) : undefined }));\n}\nconst failedWrites = writeResults ? writeResults.filter((w) => !w.ok) : [];\nconst holds = outcomes ? outcomes.filter((o) => o.status === 'HOLD' && /ENROLLMENT/.test(o.reason)) : [];\nlet status;\nif (last.mode === 'dry-run') status = P.writeBlockers.includes('Nothing to evaluate') ? 'NOTHING_TO_EVALUATE' : config.sandboxMode ? 'SANDBOX_DRY_RUN' : 'DRY_RUN';\nelse status = failedWrites.length || holds.length ? 'PARTIAL' : 'COMPLETED';\nconst tally = (k) => (outcomes || []).reduce((m, o) => { m[o[k]] = (m[o[k]] || 0) + 1; return m; }, {});\nreturn [{ json: {\n  runId: config.runId,\n  status,\n  mode: P.report.mode,\n  population: P.report.population,\n  decisions: P.report.decisions,\n  reasons: P.report.reasons,\n  routedOutbound: outcomes ? outcomes.filter((o) => o.routed && o.status === 'RECYCLED_OUTBOUND').length : 0,\n  routedNurture: outcomes ? outcomes.filter((o) => o.routed && o.status === 'RECYCLED_NURTURE').length : 0,\n  finalStatuses: outcomes ? tally('status') : null,\n  enrollmentIssues: holds.map((h) => ({ contactId: h.contactId, reason: h.reason, error: h.enrollError })),\n  writeResults,\n  gates: { contactStamps: config.writes.hubspot.allowed, sequenceEnrollment: config.writes.sequence.allowed, nurtureRouting: config.writes.nurture.allowed, enrichment: config.enrichment.allowed },\n  writeBlockedBy: last.mode === 'dry-run' ? P.writeBlockers : [],\n  warnings: config.warnings,\n  configErrors: config.configErrors,\n  safetyDecisions,\n} }];\n"
+      },
+      "id": "1bbe80e3-6f1b-4f08-a797-271ff8d0ebfe",
+      "name": "Recycle Run Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6540,
+        100
+      ]
+    }
+  ],
+  "connections": {
+    "Manual Test Trigger": {
+      "main": [
+        [
+          {
+            "node": "Config & Safety Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily Recycle Run (06:41)": {
+      "main": [
+        [
+          {
+            "node": "Config & Safety Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config & Safety Gate": {
+      "main": [
+        [
+          {
+            "node": "Sandbox Mode?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sandbox Mode?": {
+      "main": [
+        [
+          {
+            "node": "Load Synthetic Recycle Fixture",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HubSpot: Search Closed-Lost Deals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Synthetic Recycle Fixture": {
+      "main": [
+        [
+          {
+            "node": "Assemble Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Search Closed-Lost Deals": {
+      "main": [
+        [
+          {
+            "node": "Collect Deals & Build Association Reads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Deals & Build Association Reads": {
+      "main": [
+        [
+          {
+            "node": "Deal Contacts Needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deal Contacts Needed?": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Read Deal Contacts",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Collect Deal Contacts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Read Deal Contacts": {
+      "main": [
+        [
+          {
+            "node": "Collect Deal Contacts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Deal Contacts": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Search Disqualified Contacts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Search Disqualified Contacts": {
+      "main": [
+        [
+          {
+            "node": "Collect Candidates & Build Contact Reads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Candidates & Build Contact Reads": {
+      "main": [
+        [
+          {
+            "node": "Candidates Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Candidates Found?": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Read Contacts & Deal Links",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Assemble Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Read Contacts & Deal Links": {
+      "main": [
+        [
+          {
+            "node": "Collect Contacts & Build Deal Reads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Contacts & Build Deal Reads": {
+      "main": [
+        [
+          {
+            "node": "Deal Reads Needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deal Reads Needed?": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Batch Read Associated Deals",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Assemble Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Batch Read Associated Deals": {
+      "main": [
+        [
+          {
+            "node": "Assemble Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assemble Candidates": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Cooling-Off & Suppression",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Cooling-Off & Suppression": {
+      "main": [
+        [
+          {
+            "node": "Build Enrichment Requests",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Enrichment Requests": {
+      "main": [
+        [
+          {
+            "node": "Enrichment Needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrichment Needed?": {
+      "main": [
+        [
+          {
+            "node": "Sandbox Enrichment?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Route Re-Entry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sandbox Enrichment?": {
+      "main": [
+        [
+          {
+            "node": "Simulated Enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Enrichment API: Verify Contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simulated Enrichment": {
+      "main": [
+        [
+          {
+            "node": "Route Re-Entry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrichment API: Verify Contact": {
+      "main": [
+        [
+          {
+            "node": "Route Re-Entry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Re-Entry": {
+      "main": [
+        [
+          {
+            "node": "Writes Allowed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Writes Allowed?": {
+      "main": [
+        [
+          {
+            "node": "Build Enrollment Checks",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Dry-Run Routing Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dry-Run Routing Report": {
+      "main": [
+        [
+          {
+            "node": "Recycle Run Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Enrollment Checks": {
+      "main": [
+        [
+          {
+            "node": "Enrollment Checks Needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrollment Checks Needed?": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Check Active Enrollment",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Sequence Enrollments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Check Active Enrollment": {
+      "main": [
+        [
+          {
+            "node": "Build Sequence Enrollments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Sequence Enrollments": {
+      "main": [
+        [
+          {
+            "node": "Enrollments Needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrollments Needed?": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Enroll in Sequence",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Contact Updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Enroll in Sequence": {
+      "main": [
+        [
+          {
+            "node": "Build Contact Updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Contact Updates": {
+      "main": [
+        [
+          {
+            "node": "Updates Needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Updates Needed?": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Update Contacts & Nurture List",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Recycle Run Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Update Contacts & Nurture List": {
+      "main": [
+        [
+          {
+            "node": "Recycle Run Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}
