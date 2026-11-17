@@ -68,6 +68,8 @@ Per-run caps (outbound per run and per owner, nurture per run, enrichments per r
 
 ## Architecture
 
+![Workflow Overview](./workflow-overview.png)
+
 ```mermaid
 flowchart TD
     T1[Manual Test Trigger] --> CFG
