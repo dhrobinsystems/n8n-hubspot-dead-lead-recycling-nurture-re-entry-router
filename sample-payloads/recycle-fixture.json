@@ -1,0 +1,714 @@
+{
+  "_meta": {
+    "synthetic": true,
+    "description": "Fully synthetic HubSpot deals, contacts, associations and enrichment responses for the dead-lead recycler. Fictitious people at example.com, placeholder ids. Dates are relative to now (@daysAgo:N).",
+    "scenarios": {
+      "51000001": "Closed-lost 150 d ago (budget), VP, valid -> OUTBOUND closed-lost sequence",
+      "51000002": "Closed-lost 150 d ago, Marketing Manager -> NURTURE",
+      "51000003": "Closed-lost only 60 d ago -> not in population yet",
+      "51000004": "Lost to a competitor, Director -> NURTURE (nurture-only lost reason)",
+      "51000005": "Lost reason 'Do not contact - legal' -> SUPPRESS",
+      "51000006": "Has an open deal -> SUPPRESS OPEN_DEAL",
+      "51000007": "Contacted 30 d ago -> COOLING (clock restarted by last touch)",
+      "51000008": "Closed-lost 1000 d ago, outside LOOKBACK_DAYS -> not in population",
+      "51000009": "Enrichment: no longer at the company -> SUPPRESS LEFT_COMPANY (job changer)",
+      "51000010": "Enrichment: undeliverable -> SUPPRESS EMAIL_INVALID_VERIFIED",
+      "51000011": "Unsubscribed from all email -> SUPPRESS",
+      "51000012": "Hard bounce in HubSpot -> SUPPRESS",
+      "51000013": "Customer lifecycle stage -> SUPPRESS",
+      "51000014": "Disqualified 200 d ago, Founder -> OUTBOUND disqualified sequence (owner 2)",
+      "51000015": "Bad timing, title Student -> SUPPRESS TITLE_EXCLUDED",
+      "51000016": "Disqualified, no reference date at all -> HOLD NO_REFERENCE_DATE",
+      "51000017": "Enrichment timeout -> HOLD ENRICHMENT_FAILED (retried next run)",
+      "51000018": "Already recycled twice -> SUPPRESS MAX_RECYCLES_REACHED",
+      "51000019": "Evaluated 10 d ago -> SKIP RECENTLY_EVALUATED",
+      "51000020": "Office Assistant -> SUPPRESS OFF_PERSONA",
+      "51000021": "Catch-all email -> HOLD EMAIL_RISKY",
+      "51000022": "recycle_status DO_NOT_RECYCLE -> SUPPRESS",
+      "51000023": "Title changed to VP Growth -> OUTBOUND, JOB_TITLE_CHANGED",
+      "51000024": "Recycled to nurture 100 d ago -> COOLING (clock from last recycle)",
+      "51000025": "No owner, Director of IT -> OUTBOUND via default sender (already in an active sequence in the live mock)",
+      "51000026": "No email -> SUPPRESS NO_EMAIL"
+    }
+  },
+  "sandboxRouting": {
+    "sequenceMap": {
+      "CLOSED_LOST": "31000001",
+      "DISQUALIFIED": "31000002"
+    },
+    "ownerSenders": {
+      "61000001": {
+        "userId": "62000001",
+        "senderEmail": "avery.rep@example.com"
+      },
+      "61000002": {
+        "userId": "62000002",
+        "senderEmail": "blake.rep@example.com"
+      }
+    },
+    "defaultSender": {
+      "userId": "62000009",
+      "senderEmail": "sdr.team@example.com"
+    },
+    "nurtureListId": "71000001"
+  },
+  "deals": [
+    {
+      "id": "41000001",
+      "properties": {
+        "dealstage": "closedlost",
+        "pipeline": "default",
+        "closedate": "@daysAgo:150",
+        "closed_lost_reason": "Budget freeze until next fiscal year",
+        "hs_is_closed": "true",
+        "hubspot_owner_id": "61000001"
+      }
+    },
+    {
+      "id": "41000002",
+      "properties": {
+        "dealstage": "closedlost",
+        "pipeline": "default",
+        "closedate": "@daysAgo:60",
+        "closed_lost_reason": "Timing",
+        "hs_is_closed": "true",
+        "hubspot_owner_id": "61000001"
+      }
+    },
+    {
+      "id": "41000003",
+      "properties": {
+        "dealstage": "closedlost",
+        "pipeline": "default",
+        "closedate": "@daysAgo:200",
+        "closed_lost_reason": "Went with a competitor",
+        "hs_is_closed": "true",
+        "hubspot_owner_id": "61000001"
+      }
+    },
+    {
+      "id": "41000004",
+      "properties": {
+        "dealstage": "closedlost",
+        "pipeline": "default",
+        "closedate": "@daysAgo:300",
+        "closed_lost_reason": "Do not contact - legal request",
+        "hs_is_closed": "true",
+        "hubspot_owner_id": "61000001"
+      }
+    },
+    {
+      "id": "41000005",
+      "properties": {
+        "dealstage": "closedlost",
+        "pipeline": "default",
+        "closedate": "@daysAgo:400",
+        "closed_lost_reason": "No decision made",
+        "hs_is_closed": "true",
+        "hubspot_owner_id": "61000001"
+      }
+    },
+    {
+      "id": "41000006",
+      "properties": {
+        "dealstage": "appointmentscheduled",
+        "pipeline": "default",
+        "closedate": "@daysAgo:-30",
+        "closed_lost_reason": null,
+        "hs_is_closed": "false",
+        "hubspot_owner_id": "61000001"
+      }
+    },
+    {
+      "id": "41000007",
+      "properties": {
+        "dealstage": "closedlost",
+        "pipeline": "default",
+        "closedate": "@daysAgo:1000",
+        "closed_lost_reason": "Timing",
+        "hs_is_closed": "true",
+        "hubspot_owner_id": "61000001"
+      }
+    },
+    {
+      "id": "41000008",
+      "properties": {
+        "dealstage": "closedlost",
+        "pipeline": "default",
+        "closedate": "@daysAgo:180",
+        "closed_lost_reason": "Timing - revisit later",
+        "hs_is_closed": "true",
+        "hubspot_owner_id": "61000001"
+      }
+    },
+    {
+      "id": "41000009",
+      "properties": {
+        "dealstage": "closedwon",
+        "pipeline": "default",
+        "closedate": "@daysAgo:250",
+        "closed_lost_reason": null,
+        "hs_is_closed": "true",
+        "hubspot_owner_id": "61000001"
+      }
+    },
+    {
+      "id": "41000010",
+      "properties": {
+        "dealstage": "closedlost",
+        "pipeline": "default",
+        "closedate": "@daysAgo:200",
+        "closed_lost_reason": "Pricing",
+        "hs_is_closed": "true",
+        "hubspot_owner_id": "61000001"
+      }
+    }
+  ],
+  "contacts": [
+    {
+      "id": "51000001",
+      "properties": {
+        "email": "avery.example1@example.com",
+        "firstname": "Avery",
+        "lastname": "Example",
+        "jobtitle": "VP of Operations",
+        "company": "Example Co",
+        "hs_lead_status": null,
+        "lifecyclestage": "opportunity",
+        "hubspot_owner_id": "61000001",
+        "createdate": "@daysAgo:900",
+        "notes_last_contacted": "@daysAgo:140"
+      }
+    },
+    {
+      "id": "51000002",
+      "properties": {
+        "email": "blake.example2@example.com",
+        "firstname": "Blake",
+        "lastname": "Example",
+        "jobtitle": "Marketing Manager",
+        "company": "Example Co",
+        "hs_lead_status": null,
+        "lifecyclestage": "opportunity",
+        "hubspot_owner_id": "61000001",
+        "createdate": "@daysAgo:900",
+        "notes_last_contacted": "@daysAgo:150"
+      }
+    },
+    {
+      "id": "51000003",
+      "properties": {
+        "email": "casey.example3@example.com",
+        "firstname": "Casey",
+        "lastname": "Example",
+        "jobtitle": "Director of Finance",
+        "company": "Example Co",
+        "hs_lead_status": null,
+        "lifecyclestage": "opportunity",
+        "hubspot_owner_id": "61000001",
+        "createdate": "@daysAgo:900"
+      }
+    },
+    {
+      "id": "51000004",
+      "properties": {
+        "email": "drew.example4@example.com",
+        "firstname": "Drew",
+        "lastname": "Example",
+        "jobtitle": "Director of Procurement",
+        "company": "Example Co",
+        "hs_lead_status": null,
+        "lifecyclestage": "opportunity",
+        "hubspot_owner_id": "61000001",
+        "createdate": "@daysAgo:900"
+      }
+    },
+    {
+      "id": "51000005",
+      "properties": {
+        "email": "emery.example5@example.com",
+        "firstname": "Emery",
+        "lastname": "Example",
+        "jobtitle": "Head of IT",
+        "company": "Example Co",
+        "hs_lead_status": null,
+        "lifecyclestage": "opportunity",
+        "hubspot_owner_id": "61000001",
+        "createdate": "@daysAgo:900"
+      }
+    },
+    {
+      "id": "51000006",
+      "properties": {
+        "email": "finley.example6@example.com",
+        "firstname": "Finley",
+        "lastname": "Example",
+        "jobtitle": "VP Engineering",
+        "company": "Example Co",
+        "hs_lead_status": null,
+        "lifecyclestage": "opportunity",
+        "hubspot_owner_id": "61000001",
+        "createdate": "@daysAgo:900"
+      }
+    },
+    {
+      "id": "51000007",
+      "properties": {
+        "email": "gray.example7@example.com",
+        "firstname": "Gray",
+        "lastname": "Example",
+        "jobtitle": "Head of Sales",
+        "company": "Example Co",
+        "hs_lead_status": null,
+        "lifecyclestage": "opportunity",
+        "hubspot_owner_id": "61000001",
+        "createdate": "@daysAgo:900",
+        "notes_last_contacted": "@daysAgo:30"
+      }
+    },
+    {
+      "id": "51000008",
+      "properties": {
+        "email": "harper.example8@example.com",
+        "firstname": "Harper",
+        "lastname": "Example",
+        "jobtitle": "Director of Data",
+        "company": "Example Co",
+        "hs_lead_status": null,
+        "lifecyclestage": "opportunity",
+        "hubspot_owner_id": "61000001",
+        "createdate": "@daysAgo:900"
+      }
+    },
+    {
+      "id": "51000009",
+      "properties": {
+        "email": "indy.example9@example.com",
+        "firstname": "Indy",
+        "lastname": "Example",
+        "jobtitle": "Chief Revenue Officer",
+        "company": "Example Co",
+        "hs_lead_status": null,
+        "lifecyclestage": "opportunity",
+        "hubspot_owner_id": "61000001",
+        "createdate": "@daysAgo:900"
+      }
+    },
+    {
+      "id": "51000010",
+      "properties": {
+        "email": "jules.example10@example.com",
+        "firstname": "Jules",
+        "lastname": "Example",
+        "jobtitle": "Director of Marketing",
+        "company": "Example Co",
+        "hs_lead_status": null,
+        "lifecyclestage": "opportunity",
+        "hubspot_owner_id": "61000001",
+        "createdate": "@daysAgo:900"
+      }
+    },
+    {
+      "id": "51000011",
+      "properties": {
+        "email": "kai.example11@example.com",
+        "firstname": "Kai",
+        "lastname": "Example",
+        "jobtitle": "VP Finance",
+        "company": "Example Co",
+        "hs_lead_status": null,
+        "lifecyclestage": "opportunity",
+        "hubspot_owner_id": "61000001",
+        "createdate": "@daysAgo:900",
+        "hs_email_optout": "true"
+      }
+    },
+    {
+      "id": "51000012",
+      "properties": {
+        "email": "logan.example12@example.com",
+        "firstname": "Logan",
+        "lastname": "Example",
+        "jobtitle": "Head of Operations",
+        "company": "Example Co",
+        "hs_lead_status": null,
+        "lifecyclestage": "opportunity",
+        "hubspot_owner_id": "61000001",
+        "createdate": "@daysAgo:900",
+        "hs_email_hard_bounce_reason_enum": "UNKNOWN_USER"
+      }
+    },
+    {
+      "id": "51000013",
+      "properties": {
+        "email": "morgan.example13@example.com",
+        "firstname": "Morgan",
+        "lastname": "Example",
+        "jobtitle": "VP Customer Success",
+        "company": "Example Co",
+        "hs_lead_status": null,
+        "lifecyclestage": "customer",
+        "hubspot_owner_id": "61000001",
+        "createdate": "@daysAgo:900"
+      }
+    },
+    {
+      "id": "51000014",
+      "properties": {
+        "email": "noel.example14@example.com",
+        "firstname": "Noel",
+        "lastname": "Example",
+        "jobtitle": "Founder",
+        "company": "Example Co",
+        "hs_lead_status": "UNQUALIFIED",
+        "lifecyclestage": "lead",
+        "hubspot_owner_id": "61000002",
+        "createdate": "@daysAgo:900",
+        "recycle_disqualified_at": "@daysAgo:200"
+      }
+    },
+    {
+      "id": "51000015",
+      "properties": {
+        "email": "oakley.example15@example.com",
+        "firstname": "Oakley",
+        "lastname": "Example",
+        "jobtitle": "Student",
+        "company": "Example Co",
+        "hs_lead_status": "BAD_TIMING",
+        "lifecyclestage": "lead",
+        "hubspot_owner_id": "61000002",
+        "createdate": "@daysAgo:900",
+        "recycle_disqualified_at": "@daysAgo:130"
+      }
+    },
+    {
+      "id": "51000016",
+      "properties": {
+        "email": "parker.example16@example.com",
+        "firstname": "Parker",
+        "lastname": "Example",
+        "jobtitle": "Operations Manager",
+        "company": "Example Co",
+        "hs_lead_status": "UNQUALIFIED",
+        "lifecyclestage": "lead",
+        "hubspot_owner_id": "61000001",
+        "createdate": "@daysAgo:900"
+      }
+    },
+    {
+      "id": "51000017",
+      "properties": {
+        "email": "quinn.example17@example.com",
+        "firstname": "Quinn",
+        "lastname": "Example",
+        "jobtitle": "Director of Revenue Operations",
+        "company": "Example Co",
+        "hs_lead_status": "UNQUALIFIED",
+        "lifecyclestage": "lead",
+        "hubspot_owner_id": "61000001",
+        "createdate": "@daysAgo:900",
+        "recycle_disqualified_at": "@daysAgo:300"
+      }
+    },
+    {
+      "id": "51000018",
+      "properties": {
+        "email": "reese.example18@example.com",
+        "firstname": "Reese",
+        "lastname": "Example",
+        "jobtitle": "VP Sales",
+        "company": "Example Co",
+        "hs_lead_status": "UNQUALIFIED",
+        "lifecyclestage": "lead",
+        "hubspot_owner_id": "61000001",
+        "createdate": "@daysAgo:900",
+        "recycle_disqualified_at": "@daysAgo:250",
+        "recycle_count": "2"
+      }
+    },
+    {
+      "id": "51000019",
+      "properties": {
+        "email": "sage.example19@example.com",
+        "firstname": "Sage",
+        "lastname": "Example",
+        "jobtitle": "Director of Product",
+        "company": "Example Co",
+        "hs_lead_status": "UNQUALIFIED",
+        "lifecyclestage": "lead",
+        "hubspot_owner_id": "61000001",
+        "createdate": "@daysAgo:900",
+        "recycle_disqualified_at": "@daysAgo:250",
+        "recycle_status": "SUPPRESSED",
+        "recycle_reason": "OFF_PERSONA",
+        "recycle_last_evaluated_at": "@daysAgo:10"
+      }
+    },
+    {
+      "id": "51000020",
+      "properties": {
+        "email": "tatum.example20@example.com",
+        "firstname": "Tatum",
+        "lastname": "Example",
+        "jobtitle": "Office Assistant",
+        "company": "Example Co",
+        "hs_lead_status": "UNQUALIFIED",
+        "lifecyclestage": "lead",
+        "hubspot_owner_id": "61000001",
+        "createdate": "@daysAgo:900",
+        "recycle_disqualified_at": "@daysAgo:400"
+      }
+    },
+    {
+      "id": "51000021",
+      "properties": {
+        "email": "umber.example21@example.com",
+        "firstname": "Umber",
+        "lastname": "Example",
+        "jobtitle": "Engineering Manager",
+        "company": "Example Co",
+        "hs_lead_status": "UNQUALIFIED",
+        "lifecyclestage": "lead",
+        "hubspot_owner_id": "61000001",
+        "createdate": "@daysAgo:900",
+        "recycle_disqualified_at": "@daysAgo:160"
+      }
+    },
+    {
+      "id": "51000022",
+      "properties": {
+        "email": "vale.example22@example.com",
+        "firstname": "Vale",
+        "lastname": "Example",
+        "jobtitle": "Head of Partnerships",
+        "company": "Example Co",
+        "hs_lead_status": "UNQUALIFIED",
+        "lifecyclestage": "lead",
+        "hubspot_owner_id": "61000001",
+        "createdate": "@daysAgo:900",
+        "recycle_disqualified_at": "@daysAgo:365",
+        "recycle_status": "DO_NOT_RECYCLE"
+      }
+    },
+    {
+      "id": "51000023",
+      "properties": {
+        "email": "wren.example23@example.com",
+        "firstname": "Wren",
+        "lastname": "Example",
+        "jobtitle": "Head of Growth",
+        "company": "Example Co",
+        "hs_lead_status": "UNQUALIFIED",
+        "lifecyclestage": "lead",
+        "hubspot_owner_id": "61000001",
+        "createdate": "@daysAgo:900",
+        "recycle_disqualified_at": "@daysAgo:200"
+      }
+    },
+    {
+      "id": "51000024",
+      "properties": {
+        "email": "xan.example24@example.com",
+        "firstname": "Xan",
+        "lastname": "Example",
+        "jobtitle": "Director of Sales",
+        "company": "Example Co",
+        "hs_lead_status": "BAD_TIMING",
+        "lifecyclestage": "lead",
+        "hubspot_owner_id": "61000002",
+        "createdate": "@daysAgo:900",
+        "recycle_disqualified_at": "@daysAgo:210",
+        "recycle_last_routed_at": "@daysAgo:100",
+        "recycle_count": "1",
+        "recycle_status": "RECYCLED_NURTURE",
+        "recycle_route": "NURTURE"
+      }
+    },
+    {
+      "id": "51000025",
+      "properties": {
+        "email": "yael.example25@example.com",
+        "firstname": "Yael",
+        "lastname": "Example",
+        "jobtitle": "Director of IT",
+        "company": "Example Co",
+        "hs_lead_status": "UNQUALIFIED",
+        "lifecyclestage": "lead",
+        "hubspot_owner_id": null,
+        "createdate": "@daysAgo:900",
+        "recycle_disqualified_at": "@daysAgo:180"
+      }
+    },
+    {
+      "id": "51000026",
+      "properties": {
+        "email": null,
+        "firstname": "Zion",
+        "lastname": "Example",
+        "jobtitle": "VP Marketing",
+        "company": "Example Co",
+        "hs_lead_status": "UNQUALIFIED",
+        "lifecyclestage": "lead",
+        "hubspot_owner_id": "61000001",
+        "createdate": "@daysAgo:900",
+        "recycle_disqualified_at": "@daysAgo:200"
+      }
+    }
+  ],
+  "associations": {
+    "dealContacts": {
+      "41000001": [
+        "51000001",
+        "51000002"
+      ],
+      "41000002": [
+        "51000003"
+      ],
+      "41000003": [
+        "51000004"
+      ],
+      "41000004": [
+        "51000005"
+      ],
+      "41000005": [
+        "51000006",
+        "51000007"
+      ],
+      "41000006": [
+        "51000006"
+      ],
+      "41000007": [
+        "51000008"
+      ],
+      "41000008": [
+        "51000009",
+        "51000010",
+        "51000011",
+        "51000012"
+      ],
+      "41000009": [
+        "51000013"
+      ],
+      "41000010": [
+        "51000013"
+      ]
+    },
+    "contactDeals": {
+      "51000001": [
+        "41000001"
+      ],
+      "51000002": [
+        "41000001"
+      ],
+      "51000003": [
+        "41000002"
+      ],
+      "51000004": [
+        "41000003"
+      ],
+      "51000005": [
+        "41000004"
+      ],
+      "51000006": [
+        "41000005",
+        "41000006"
+      ],
+      "51000007": [
+        "41000005"
+      ],
+      "51000008": [
+        "41000007"
+      ],
+      "51000009": [
+        "41000008"
+      ],
+      "51000010": [
+        "41000008"
+      ],
+      "51000011": [
+        "41000008"
+      ],
+      "51000012": [
+        "41000008"
+      ],
+      "51000013": [
+        "41000009",
+        "41000010"
+      ]
+    }
+  },
+  "enrichment": {
+    "avery.example1@example.com": {
+      "email_status": "valid",
+      "job_title": "VP of Operations",
+      "company": "Example Co",
+      "still_at_company": true
+    },
+    "blake.example2@example.com": {
+      "email_status": "valid",
+      "job_title": "Marketing Manager",
+      "company": "Example Co",
+      "still_at_company": true
+    },
+    "drew.example4@example.com": {
+      "email_status": "deliverable",
+      "job_title": "Director of Procurement",
+      "company": "Example Co",
+      "still_at_company": true
+    },
+    "indy.example9@example.com": {
+      "email_status": "valid",
+      "job_title": "Chief Revenue Officer",
+      "company": "Another Example Inc",
+      "still_at_company": false
+    },
+    "jules.example10@example.com": {
+      "email_status": "undeliverable",
+      "job_title": "Director of Marketing",
+      "still_at_company": true
+    },
+    "noel.example14@example.com": {
+      "email_status": "valid",
+      "job_title": "Founder",
+      "company": "Example Co",
+      "still_at_company": true
+    },
+    "oakley.example15@example.com": {
+      "email_status": "valid",
+      "job_title": "Student",
+      "still_at_company": true
+    },
+    "quinn.example17@example.com": {
+      "__error": "timeout of 15000ms exceeded (simulated)"
+    },
+    "tatum.example20@example.com": {
+      "email_status": "valid",
+      "job_title": "Office Assistant",
+      "still_at_company": true
+    },
+    "umber.example21@example.com": {
+      "email_status": "catch_all",
+      "job_title": "Engineering Manager",
+      "still_at_company": true
+    },
+    "wren.example23@example.com": {
+      "email_status": "valid",
+      "job_title": "VP Growth",
+      "company": "Example Co",
+      "still_at_company": true
+    },
+    "yael.example25@example.com": {
+      "email_status": "valid",
+      "job_title": "Director of IT",
+      "still_at_company": true
+    }
+  },
+  "activeEnrollments": {
+    "51000025": {
+      "id": "81000001",
+      "sequenceId": "31000099",
+      "enrolledAt": "@daysAgo:5"
+    }
+  }
+}
